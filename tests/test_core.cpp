@@ -22,7 +22,7 @@ struct Sim {
   Core core;
   std::mt19937 rng{1};
   double s_true = -35.0;   // speaker at mics, referred to V = 0, M = 0
-  double room_in = -68.0;  // room at the input (unweighted)
+  double room_in = -80.0;  // room at the input (A-weighted, like N_A)
   double room_aw = -80.0;  // room A-weighted
   float volume = 1.0f;
   bool amp = true;
@@ -32,6 +32,7 @@ struct Sim {
   Sim() {
     core.cfg.media_volume_min = 0.1f;
     core.cfg.media_volume_max = 1.0f;
+    core.cfg.speaker_level_nominal = -35.0f;
     core.enabled = true;
   }
   static double pw(double db) { return std::pow(10.0, db / 10.0); }
@@ -123,12 +124,12 @@ int main() {
     auto r = sim.reply(2.0);
     CHECK(r.kind == CalResult::SKIPPED, "amp off skipped");
   }
-  // 5. Short reply (0.5 s of sound, 0.2 s after the start delay): too short.
+  // 5. Short reply: 0.2 s of clear speech (< 0.3 s active): not counted, S kept.
   {
     Sim sim;
     sim.idle(15);
-    auto r = sim.reply(0.35);
-    CHECK(r.kind == CalResult::SKIPPED, "0.35 s reply skipped (kind %d)", r.kind);
+    auto r = sim.reply(0.2);
+    CHECK(r.kind == CalResult::SKIPPED, "0.2 s of speech skipped (kind %d)", r.kind);
   }
   // 6. Offset +6 -> 6 dB less attenuation; announcement offset reduces M only.
   {

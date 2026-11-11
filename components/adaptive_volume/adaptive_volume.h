@@ -25,7 +25,7 @@
 namespace esphome {
 namespace adaptive_volume {
 
-static constexpr const char *ADAPTIVE_VOLUME_VERSION = "0.1.0";
+static constexpr const char *ADAPTIVE_VOLUME_VERSION = "0.2.0";
 
 class AdaptiveVolume;
 
@@ -120,10 +120,9 @@ class AdaptiveVolume : public Component, public esp_audio_stack::AudioCaptureObs
   Core core_;
   ESPPreferenceObject s_pref_;
 
-  // audio-task state (A-weighting filter)
-  float b0_{0}, b1_{0}, b2_{0}, a1_{0}, a2_{0}, rc_a_{0};
-  float x1_{0}, x2_{0}, y1_{0}, y2_{0}, hp_x1_{0}, hp_y1_{0};
-  uint32_t filter_rate_{0};
+  // audio-task state (A-weighting filters)
+  AWeighting aw_in_, aw_out_;
+  float saved_s_{NAN};
 
   static constexpr uint32_t RING = 128;
   Block ring_[RING];

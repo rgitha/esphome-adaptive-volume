@@ -18,7 +18,7 @@ from esphome.const import (
     STATE_CLASS_MEASUREMENT,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 CODEOWNERS = ["@rgitha"]
 DEPENDENCIES = ["esp_audio_stack", "media_player"]
@@ -75,7 +75,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Required(CONF_REPLY): cv.returning_lambda,
             # Output muted or amplifier off (invalidates a reply measurement).
             cv.Optional(CONF_BLOCKED): cv.returning_lambda,
-            cv.Optional(CONF_SPEAKER_LEVEL_NOMINAL, default=-35.0): cv.float_range(
+            cv.Optional(CONF_SPEAKER_LEVEL_NOMINAL, default=-30.0): cv.float_range(
                 min=-90.0, max=0.0
             ),
             cv.Optional(CONF_LOUDNESS_CONSTANT, default=20.0): cv.float_range(
@@ -96,7 +96,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_MEDIA_VOLUME_MIN, default=0.0): cv.percentage,
             cv.Optional(CONF_MEDIA_VOLUME_MAX, default=1.0): cv.percentage,
             cv.Optional(
-                CONF_REPLY_START_DELAY, default="300ms"
+                CONF_REPLY_START_DELAY, default="0ms"
             ): cv.positive_time_period_milliseconds,
             cv.Optional(
                 CONF_REPLY_MIN_DURATION, default="400ms"

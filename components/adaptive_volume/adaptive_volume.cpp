@@ -55,8 +55,10 @@ void AdaptiveVolume::setup() {
   }
   this->s_pref_ = global_preferences->make_preference<float>(S_PREF_HASH);
   float stored = NAN;
-  if (this->s_pref_.load(&stored) && std::isfinite(stored))
+  if (this->s_pref_.load(&stored) && std::isfinite(stored)) {
     this->core_.restore_s(stored);
+    this->saved_s_ = stored;
+  }
 #ifdef USE_SENSOR
   if (this->speaker_level_sensor_ != nullptr && !std::isnan(this->core_.s))
     this->speaker_level_sensor_->publish_state(this->core_.s);
@@ -121,47 +123,24 @@ void AdaptiveVolume::on_capture_frame(const esp_audio_stack::CaptureFrame &frame
   Block b{};
   b.n = static_cast<uint32_t>(frame.frames);
   b.ts_us = frame.timestamp_us;
-  double sum = 0.0;
+  AWeighting *w;
   if (frame.point == esp_audio_stack::CapturePoint::PROCESSOR_INPUT) {
-    // Mic 1 (first channel), before echo cancellation and BSS
-    for (size_t i = 0; i < frame.frames; i++) {
-      const float x = smp[i * stride] * (1.0f / 32768.0f);
-      sum += static_cast<double>(x) * x;
-    }
+    w = &this->aw_in_;  // mic 1 (first channel), before echo cancellation and BSS
     b.point = 0;
   } else if (frame.point == esp_audio_stack::CapturePoint::OUTPUT) {
-    // Approximate A-weighting: 2nd-order high-pass 200 Hz + 1st-order high-pass 500 Hz
-    if (frame.sample_rate != this->filter_rate_ && frame.sample_rate > 0) {
-      const float fs = static_cast<float>(frame.sample_rate);
-      const float w0 = 2.0f * static_cast<float>(M_PI) * 200.0f / fs;
-      const float c = cosf(w0), al = sinf(w0) / (2.0f * 0.7071f);
-      const float a0 = 1.0f + al;
-      this->b0_ = (1.0f + c) / 2.0f / a0;
-      this->b1_ = -(1.0f + c) / a0;
-      this->b2_ = this->b0_;
-      this->a1_ = -2.0f * c / a0;
-      this->a2_ = (1.0f - al) / a0;
-      const float rc = 1.0f / (2.0f * static_cast<float>(M_PI) * 500.0f), dt = 1.0f / fs;
-      this->rc_a_ = rc / (rc + dt);
-      this->x1_ = this->x2_ = this->y1_ = this->y2_ = this->hp_x1_ = this->hp_y1_ = 0.0f;
-      this->filter_rate_ = frame.sample_rate;
-    }
-    for (size_t i = 0; i < frame.frames; i++) {
-      const float in = smp[i * stride] * (1.0f / 32768.0f);
-      const float y = this->b0_ * in + this->b1_ * this->x1_ + this->b2_ * this->x2_ - this->a1_ * this->y1_ -
-                      this->a2_ * this->y2_;
-      this->x2_ = this->x1_;
-      this->x1_ = in;
-      this->y2_ = this->y1_;
-      this->y1_ = y;
-      const float hp = this->rc_a_ * (this->hp_y1_ + y - this->hp_x1_);
-      this->hp_x1_ = y;
-      this->hp_y1_ = hp;
-      sum += static_cast<double>(hp) * hp;
-    }
+    w = &this->aw_out_;  // processed output (room noise)
     b.point = 1;
   } else {
     return;
+  }
+  if (frame.sample_rate != w->rate && frame.sample_rate > 0)
+    w->setup(frame.sample_rate);
+  // Both points are A-weighted, so the speaker and room levels are measured in
+  // the same band as the room noise (also keeps low-frequency hum out).
+  double sum = 0.0;
+  for (size_t i = 0; i < frame.frames; i++) {
+    const float y = w->process(smp[i * stride] * (1.0f / 32768.0f));
+    sum += static_cast<double>(y) * y;
   }
   b.sum_sq = static_cast<float>(sum);
   this->push_(b);
@@ -198,7 +177,11 @@ void AdaptiveVolume::loop() {
     this->log_result_(r);
     if (r.kind == CalResult::DETECTED || r.kind == CalResult::LOWERED) {
       float s = this->core_.s;
-      this->s_pref_.save(&s);
+      // Flash only when S moved by 1 dB or more since the last save
+      if (std::isnan(this->saved_s_) || std::fabs(s - this->saved_s_) >= 1.0f) {
+        this->s_pref_.save(&s);
+        this->saved_s_ = s;
+      }
 #ifdef USE_SENSOR
       if (this->speaker_level_sensor_ != nullptr)
         this->speaker_level_sensor_->publish_state(s);
@@ -217,22 +200,24 @@ void AdaptiveVolume::loop() {
 void AdaptiveVolume::log_result_(const CalResult &r) {
   switch (r.kind) {
     case CalResult::SKIPPED:
-      ESP_LOGD(TAG, "Speaker calibration: reply not counted (%s, %.2f s)", r.reason, r.seconds);
+      ESP_LOGD(TAG, "Speaker calibration: reply not counted (%s; %.2f s, speech %.2f s)", r.reason, r.seconds,
+               r.active_s);
       break;
     case CalResult::DETECTED:
       ESP_LOGD(TAG,
-               "Speaker calibration: input %.1f (%.2f s), room %.1f, volume %.0f%%, attenuation %.0f dB "
-               "-> S_k %.1f, S %.1f (mean of %d, was %.1f)",
-               r.in_l, r.seconds, r.room_l, r.v0 * 100.0f, r.m0, r.s_k, r.s_new, r.hist_n, r.s_old);
+               "Speaker calibration: speech %.1f (%.2f of %.2f s), room %.1f, volume %.0f%%, attenuation %.0f dB "
+               "-> S_k %.1f%s, S %.1f (mean of %d, was %.1f)",
+               r.in_l, r.active_s, r.seconds, r.room_l, r.v0 * 100.0f, r.m0, r.s_k,
+               r.marginal ? " (marginal, lowers only)" : "", r.s_new, r.hist_n, r.s_old);
       break;
     case CalResult::LOWERED:
       ESP_LOGD(TAG,
-               "Speaker calibration: not detected (input %.1f, room %.1f, volume %.0f%%, attenuation %.0f dB): "
+               "Speaker calibration: no speech above room (input %.1f, room %.1f, volume %.0f%%, attenuation %.0f dB): "
                "S %.1f > bound %.1f -> S %.1f",
                r.in_l, r.room_l, r.v0 * 100.0f, r.m0, r.s_old, r.bound, r.s_new);
       break;
     case CalResult::WITHIN_BOUND:
-      ESP_LOGD(TAG, "Speaker calibration: not detected (input %.1f, room %.1f): S %.1f within bound %.1f", r.in_l,
+      ESP_LOGD(TAG, "Speaker calibration: no speech above room (input %.1f, room %.1f): S %.1f within bound %.1f", r.in_l,
                r.room_l, r.s_old, r.bound);
       break;
     default:

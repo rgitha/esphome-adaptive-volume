@@ -1,6 +1,6 @@
 # esphome-adaptive-volume
 
-> Version 0.1.0: in development and testing, not released yet.
+> Version 0.2.0: in development and testing, not released yet.
 
 ESPHome external component that turns all sound down in a quiet room and back
 up when the room gets louder. It works on voice devices built on
@@ -69,14 +69,14 @@ attenuation, so it has no effect when the attenuation is already 0.
 | `esp_audio_stack_id` | required | The audio stack (its capture interface and master volume) |
 | `media_player` | required | Media player whose volume is the slider |
 | `idle`, `reply`, `blocked` | required, required, optional | Conditions, see above |
-| `speaker_level_nominal` | -35 | Speaker level S (dBFS) before the first measured reply. Set it to what this hardware measures |
+| `speaker_level_nominal` | -30 | Speaker level S (dBFS) before the first measured reply. Set it to what this hardware measures |
 | `loudness_constant` | 20 | C: speech level above room noise at the mics, at full slider (dB) |
 | `max_attenuation` | 30 | Largest attenuation (dB) |
 | `hysteresis` | 2 | Attenuation changes only when the target moves this far (dB) |
 | `master_volume_min_db` | -40 | Must equal `master_volume_min_db` of `esp_audio_stack` |
 | `software_volume_min_db` | -49 | The stack's software volume curve floor |
 | `media_volume_min`, `media_volume_max` | 0, 1 | Must equal `volume_min`, `volume_max` of the media player |
-| `reply_start_delay` | 300ms | Time from ANNOUNCING to the reply's sound at the mics |
+| `reply_start_delay` | 0ms | Ignore the start of each reply for this long (normally not needed: silence is excluded anyway) |
 | `reply_min_duration` | 400ms | Shortest measured reply |
 
 Entities, all optional: `enable` (switch, off by default), `offset` (number,
@@ -106,27 +106,33 @@ Only time when the device is idle (the `idle` condition) is used; otherwise the
 estimate holds.
 
 **Room level before the reply P_room,pre.** The same estimator runs on the
-unweighted processor input (mic 1, before echo cancellation), idle time only.
-So it holds the room level from before the wake word.
+processor input (mic 1, before echo cancellation), A-weighted like the room
+noise, idle time only. So it holds the room level from before the wake word.
 
-**Speaker level S**, measured at the end of each reply (`reply` condition):
+**Speaker level S**, measured at the end of each reply (`reply` condition),
+on the A-weighted processor input, frame by frame (about 32 ms):
 
-- P_in,reply = mean input power, from `reply_start_delay` after the reply
-  starts until it ends.
-- P_spk = P_in,reply − P_room,pre.
-- Detected when the input is at least 2 dB above the room
-  (P_spk ≥ 0.585·P_room,pre). Then
-  S_k = 10·log10(P_spk) − V(v₀) + M₀, where V(v) is the software volume gain
-  and M₀ the codec attenuation during the reply. S is the power mean of the
-  last up to 3 S_k.
-- Not detected: S_bound = 10·log10(0.585·P_room,pre) − V(v₀) + M₀. If S is
-  above it, S drops to S_bound − 3 dB (not below nominal − 30 dB), so the next
-  reply plays loud enough to be measured.
+- A frame counts as speech when its power is at least twice the room
+  (3 dB above). Silence, pauses and the time before the TTS audio arrives
+  stay at room level and are left out.
+- With at least 0.3 s of speech frames:
+  S_k = 10·log10(mean over speech frames of (P_in − P_room,pre)) − V(v₀) + M₀,
+  where V(v) is the software volume gain and M₀ the codec attenuation during
+  the reply. S is the power mean of the last up to 3 S_k.
+- Close to the room, only the louder syllables pass the gate and S_k reads
+  high. So when the expected speech level (from the S in use) is less than
+  9 dB above the room, S_k may only lower S, never raise it.
+- Less than 0.3 s of speech that is clearly audible (at least 6 dB above the
+  room): not counted.
+- No speech above the room: the speaker was at most at room level, so
+  S_bound = L_room,pre − V(v₀) + M₀. If S is above it, S drops to
+  S_bound − 3 dB (not below nominal − 30 dB), so the next reply plays loud
+  enough to be measured.
 - Not counted: volume or attenuation changed, `blocked`, shorter than
   `reply_min_duration`, room reference not ready (10 s of idle after boot),
-  volume 0, input above −6 dBFS.
+  volume 0, speech above −6 dBFS.
 
-S is saved to flash.
+S is saved to flash when it has moved by 1 dB or more since the last save.
 
 **Attenuation.** A_t = clamp(S − N_A − C, 0, max_attenuation), with
 C = loudness_constant + offset. A follows A_t in whole dB when it moves by
@@ -134,7 +140,8 @@ C = loudness_constant + offset. A follows A_t in whole dB when it moves by
 being the announcement offset.
 
 The logic is in `av_core.h`, which has no ESPHome dependencies; `tests/`
-holds a host test (`g++ -std=c++17 -I components/adaptive_volume tests/test_core.cpp`).
+holds host tests (`g++ -std=c++17 -I components/adaptive_volume tests/test_core.cpp`, and
+`tests/test_gating.cpp`, a model of TTS replies with silence at several volume settings).
 
 ## License
 
