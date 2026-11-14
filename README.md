@@ -1,6 +1,6 @@
 # esphome-adaptive-volume
 
-> Version 0.3.0: in development and testing, not released yet.
+> Version 0.3.1: in development and testing, not released yet.
 
 ESPHome external component that turns all sound down in a quiet room and back
 up when the room gets louder. It works on voice devices built on
@@ -51,6 +51,10 @@ adaptive_volume:
     name: Adaptive volume reduction
   current_volume:
     name: Current volume
+  echo_reduction:
+    name: Echo reduction
+  mic_peak:
+    name: Mic peak
 ```
 
 The three conditions are lambdas so the component fits any voice assistant
@@ -81,7 +85,8 @@ attenuation, so it has no effect when the attenuation is already 0.
 
 Entities, all optional: `enable` (switch, off by default), `offset` (number,
 -6 to +6 dB, + = louder), and the sensors `room_noise`, `speaker_level`,
-`speaker_level_reply`, `attenuation`, `current_volume`. The noise, attenuation
+`speaker_level_reply`, `attenuation`, `current_volume`, and the diagnostics
+`echo_reduction` and `mic_peak` (see Echo reduction below). The noise, attenuation
 and volume sensors report at most every 10 s, and only on change; user actions
 show at once.
 
@@ -141,6 +146,15 @@ S is saved to flash when it has moved by 1 dB or more since the last save.
 C = loudness_constant + offset. A follows A_t in whole dB when it moves by
 `hysteresis` or more (0 below 0.5 dB). The codec gets M = max(0, A − B), B
 being the announcement offset.
+
+**Echo reduction (diagnostic).** Over each stretch of playback (media player
+playing or announcing, at least 1.5 s): the A-weighted level of mic 1 before
+echo cancellation and of the processed output, each with its room level
+subtracted. Echo reduction = input echo − output residual, in dB; reported when
+the input is at least 15 dB above the room, as a lower bound when the output
+stays at its room level. Talking during playback lowers it. `mic_peak` is the
+largest mic sample (all mics, before processing) in that stretch, in dBFS:
+near 0 dBFS the input clips and echo cancellation suffers.
 
 The logic is in `av_core.h`, which has no ESPHome dependencies; `tests/`
 holds host tests (`g++ -std=c++17 -I components/adaptive_volume tests/test_core.cpp`, and

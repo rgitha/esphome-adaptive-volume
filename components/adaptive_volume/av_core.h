@@ -120,6 +120,82 @@ struct AWeighting {
   }
 };
 
+// Echo reduction while the device plays (diagnostic). Over one playback
+// session (media player playing or announcing): the A-weighted level of mic 1
+// before echo cancellation and of the processed output, each with its room
+// level subtracted. Echo reduction = input echo - output residual (dB). Valid
+// when the input is at least ECHO_DB above the room (the echo dominates);
+// when the output is within 1 dB of its room level the result is a lower bound.
+// Talking during playback adds to the output and lowers the result.
+struct EchoResult {
+  bool valid{false};       // echo reduction measured
+  bool lower_bound{false}; // output residual at the room level: at least this much
+  const char *reason{""};
+  float seconds{0}, in_l{NAN}, out_l{NAN}, room_in{NAN}, room_out{NAN}, erle{NAN};
+  float peak_dbfs{NAN};    // largest mic sample (all mics, before processing)
+};
+
+struct EchoMeter {
+  static constexpr float MIN_SECONDS = 1.5f;
+  static constexpr float ECHO_DB = 15.0f;
+  bool active{false};
+  double in_sum{0}, out_sum{0};
+  uint32_t in_n{0}, out_n{0};
+  uint16_t peak{0};
+
+  void start() {
+    active = true;
+    in_sum = out_sum = 0;
+    in_n = out_n = 0;
+    peak = 0;
+  }
+  void add_input(double sum_sq, uint32_t n, uint16_t pk) {
+    in_sum += sum_sq;
+    in_n += n;
+    peak = std::max(peak, pk);
+  }
+  void add_output(double sum_sq, uint32_t n) {
+    out_sum += sum_sq;
+    out_n += n;
+  }
+  EchoResult finish(float room_in_db, float room_out_db, float rate) {
+    active = false;
+    EchoResult r;
+    r.seconds = in_n / rate;
+    if (r.seconds < MIN_SECONDS || out_n == 0) {
+      r.reason = "too short";
+      return r;
+    }
+    r.peak_dbfs = peak > 0 ? 20.0f * std::log10(peak / 32768.0f) : -96.0f;
+    r.in_l = static_cast<float>(10.0 * std::log10(in_sum / in_n + 1e-12));
+    r.out_l = static_cast<float>(10.0 * std::log10(out_sum / out_n + 1e-12));
+    r.room_in = room_in_db;
+    r.room_out = room_out_db;
+    if (std::isnan(room_in_db) || std::isnan(room_out_db)) {
+      r.reason = "room reference not ready";
+      return r;
+    }
+    const double p_room_in = std::pow(10.0, room_in_db / 10.0);
+    const double p_room_out = std::pow(10.0, room_out_db / 10.0);
+    const double p_in = in_sum / in_n, p_out = out_sum / out_n;
+    if (p_in < std::pow(10.0, ECHO_DB / 10.0) * p_room_in) {
+      r.reason = "playback too quiet at the mic";
+      return r;
+    }
+    // Output residual above its room level; at most 1 dB above the room the
+    // residual is not measurable: use 1 dB above as a floor (lower bound).
+    double resid = p_out - p_room_out;
+    const double floor = (std::pow(10.0, 0.1) - 1.0) * p_room_out;
+    if (resid < floor) {
+      resid = floor;
+      r.lower_bound = true;
+    }
+    r.erle = static_cast<float>(10.0 * std::log10(p_in - p_room_in) - 10.0 * std::log10(resid));
+    r.valid = true;
+    return r;
+  }
+};
+
 struct CoreConfig {
   float sample_rate{16000.0f};      // rate of the blocks fed (processor input / output)
   float speaker_level_nominal{-30.0f};

@@ -203,6 +203,37 @@ int main() {
     CHECK(std::fabs(first - (-77.0f)) < 0.5f, "first estimate %.1f (room -77)", first);
     printf("10: first estimate after a loud boot block = %.1f (room -77)\n", first);
   }
+  // 11. Echo meter: input echo 40 dB above the room, output residual 25 dB below
+  //     the input echo -> 25 dB; output at the room level -> lower bound; quiet
+  //     playback -> not measured; peak in dBFS.
+  {
+    auto pw = [](double db) { return std::pow(10.0, db / 10.0); };
+    const float room_in = -77.0f, room_out = -78.0f;
+    EchoMeter e;
+    e.start();
+    for (int i = 0; i < 100; i++) {  // 3.2 s of 512-sample frames
+      e.add_input((pw(-37.0) + pw(room_in)) * 512, 512, 16384);
+      e.add_output((pw(-62.0) + pw(room_out)) * 512, 512);
+    }
+    EchoResult r = e.finish(room_in, room_out, 16000.0f);
+    CHECK(r.valid && !r.lower_bound && std::fabs(r.erle - 25.0f) < 0.2f, "erle %.2f", r.erle);
+    CHECK(std::fabs(r.peak_dbfs - (-6.02f)) < 0.1f, "peak %.2f", r.peak_dbfs);
+    e.start();
+    for (int i = 0; i < 100; i++) {
+      e.add_input((pw(-37.0) + pw(room_in)) * 512, 512, 1000);
+      e.add_output(pw(room_out) * 512, 512);
+    }
+    r = e.finish(room_in, room_out, 16000.0f);
+    CHECK(r.valid && r.lower_bound, "lower bound expected");
+    e.start();
+    for (int i = 0; i < 100; i++) {
+      e.add_input((pw(-70.0) + pw(room_in)) * 512, 512, 100);
+      e.add_output(pw(room_out) * 512, 512);
+    }
+    r = e.finish(room_in, room_out, 16000.0f);
+    CHECK(!r.valid, "quiet playback not measured");
+    printf("11: echo meter ok\n");
+  }
   printf(failures == 0 ? "ALL PASSED\n" : "%d FAILURES\n", failures);
   return failures == 0 ? 0 : 1;
 }

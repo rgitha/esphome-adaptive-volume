@@ -2,8 +2,10 @@
 
 #ifdef USE_ESP32
 
+#include <algorithm>
 #include <cinttypes>
 #include <cmath>
+#include <cstdlib>
 #include <esp_timer.h>
 
 #include "esphome/core/hal.h"
@@ -127,6 +129,13 @@ void AdaptiveVolume::on_capture_frame(const esp_audio_stack::CaptureFrame &frame
   if (frame.point == esp_audio_stack::CapturePoint::PROCESSOR_INPUT) {
     w = &this->aw_in_;  // mic 1 (first channel), before echo cancellation and BSS
     b.point = 0;
+    // Largest sample over all mic channels (clipping check)
+    const size_t ch = std::max<size_t>(1, std::min<size_t>(frame.channels, stride));
+    int32_t pk = 0;
+    for (size_t i = 0; i < frame.frames; i++)
+      for (size_t c = 0; c < ch; c++)
+        pk = std::max<int32_t>(pk, std::abs(static_cast<int32_t>(smp[i * stride + c])));
+    b.peak = static_cast<uint16_t>(std::min<int32_t>(pk, 65535));
   } else if (frame.point == esp_audio_stack::CapturePoint::OUTPUT) {
     w = &this->aw_out_;  // processed output (room noise)
     b.point = 1;
@@ -151,14 +160,28 @@ void AdaptiveVolume::on_capture_frame(const esp_audio_stack::CaptureFrame &frame
 void AdaptiveVolume::loop() {
   const bool idle = this->idle_f_ ? this->idle_f_() : false;
   bool noise_updated = false;
+  // Echo reduction: one session per stretch of playback
+  const bool playing = this->media_player_ != nullptr &&
+                       (this->media_player_->state == media_player::MEDIA_PLAYER_STATE_PLAYING ||
+                        this->media_player_->state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING);
+  if (playing && !this->echo_.active)
+    this->echo_.start();
+  else if (!playing && this->echo_.active)
+    this->echo_finish_();
   uint32_t tail = this->ring_tail_.load(std::memory_order_relaxed);
   const uint32_t head = this->ring_head_.load(std::memory_order_acquire);
   while (tail != head) {
     const Block &b = this->ring_[tail];
-    if (b.point == 0)
+    if (b.point == 0) {
       this->core_.on_input(b.sum_sq, b.n, b.ts_us, idle);
-    else if (this->core_.on_aweighted(b.sum_sq, b.n, idle))
-      noise_updated = true;
+      if (this->echo_.active)
+        this->echo_.add_input(b.sum_sq, b.n, b.peak);
+    } else {
+      if (this->core_.on_aweighted(b.sum_sq, b.n, idle))
+        noise_updated = true;
+      if (this->echo_.active)
+        this->echo_.add_output(b.sum_sq, b.n);
+    }
     tail = (tail + 1) % RING;
   }
   this->ring_tail_.store(tail, std::memory_order_release);
@@ -195,6 +218,29 @@ void AdaptiveVolume::loop() {
   if (noise_updated)
     this->apply_(false);
   this->publish_reports_(false);
+}
+
+void AdaptiveVolume::echo_finish_() {
+  const EchoResult e = this->echo_.finish(this->core_.room_pre, this->core_.n_a, this->core_.cfg.sample_rate);
+  if (std::isnan(e.peak_dbfs)) {
+    ESP_LOGV(TAG, "Echo: playback not measured (%s, %.1f s)", e.reason, e.seconds);
+    return;
+  }
+  if (e.valid) {
+    ESP_LOGD(TAG,
+             "Echo: %.1f s playback, mic 1 %.1f dBFS (room %.1f), output %.1f (room %.1f) -> echo reduction %s%.1f dB, "
+             "mic peak %.1f dBFS",
+             e.seconds, e.in_l, e.room_in, e.out_l, e.room_out, e.lower_bound ? ">= " : "", e.erle, e.peak_dbfs);
+  } else {
+    ESP_LOGD(TAG, "Echo: %.1f s playback, echo reduction not measured (%s), mic peak %.1f dBFS", e.seconds, e.reason,
+             e.peak_dbfs);
+  }
+#ifdef USE_SENSOR
+  if (e.valid && this->echo_reduction_sensor_ != nullptr)
+    this->echo_reduction_sensor_->publish_state(e.erle);
+  if (this->mic_peak_sensor_ != nullptr)
+    this->mic_peak_sensor_->publish_state(e.peak_dbfs);
+#endif
 }
 
 void AdaptiveVolume::log_result_(const CalResult &r) {

@@ -25,7 +25,7 @@
 namespace esphome {
 namespace adaptive_volume {
 
-static constexpr const char *ADAPTIVE_VOLUME_VERSION = "0.3.0";
+static constexpr const char *ADAPTIVE_VOLUME_VERSION = "0.3.1";
 
 class AdaptiveVolume;
 
@@ -53,6 +53,7 @@ struct Block {
   float sum_sq;   // sum of squared normalized samples
   uint32_t n;     // samples
   uint64_t ts_us;
+  uint16_t peak;  // input only: largest absolute sample over all mics
 };
 
 class AdaptiveVolume : public Component, public esp_audio_stack::AudioCaptureObserver {
@@ -88,6 +89,8 @@ class AdaptiveVolume : public Component, public esp_audio_stack::AudioCaptureObs
   void set_room_noise_sensor(sensor::Sensor *s) { this->room_noise_sensor_ = s; }
   void set_speaker_level_sensor(sensor::Sensor *s) { this->speaker_level_sensor_ = s; }
   void set_speaker_level_reply_sensor(sensor::Sensor *s) { this->speaker_level_reply_sensor_ = s; }
+  void set_echo_reduction_sensor(sensor::Sensor *s) { this->echo_reduction_sensor_ = s; }
+  void set_mic_peak_sensor(sensor::Sensor *s) { this->mic_peak_sensor_ = s; }
   void set_attenuation_sensor(sensor::Sensor *s) { this->attenuation_sensor_ = s; }
   void set_current_volume_sensor(sensor::Sensor *s) { this->current_volume_sensor_ = s; }
 #endif
@@ -112,12 +115,14 @@ class AdaptiveVolume : public Component, public esp_audio_stack::AudioCaptureObs
   void apply_master_();
   void publish_reports_(bool force);
   void log_result_(const CalResult &r);
+  void echo_finish_();
 
   esp_audio_stack::ESPAudioStack *stack_{nullptr};
   media_player::MediaPlayer *media_player_{nullptr};
   std::function<bool()> idle_f_, reply_f_, blocked_f_;
   float master_min_db_{-40.0f};
   Core core_;
+  EchoMeter echo_;
   ESPPreferenceObject s_pref_;
 
   // audio-task state (A-weighting filters)
@@ -140,6 +145,8 @@ class AdaptiveVolume : public Component, public esp_audio_stack::AudioCaptureObs
   sensor::Sensor *room_noise_sensor_{nullptr};
   sensor::Sensor *speaker_level_sensor_{nullptr};
   sensor::Sensor *speaker_level_reply_sensor_{nullptr};
+  sensor::Sensor *echo_reduction_sensor_{nullptr};
+  sensor::Sensor *mic_peak_sensor_{nullptr};
   sensor::Sensor *attenuation_sensor_{nullptr};
   sensor::Sensor *current_volume_sensor_{nullptr};
 #endif

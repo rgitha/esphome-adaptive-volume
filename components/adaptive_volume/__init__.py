@@ -18,7 +18,7 @@ from esphome.const import (
     STATE_CLASS_MEASUREMENT,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 CODEOWNERS = ["@rgitha"]
 DEPENDENCIES = ["esp_audio_stack", "media_player"]
@@ -45,6 +45,8 @@ CONF_SPEAKER_LEVEL = "speaker_level"
 CONF_SPEAKER_LEVEL_REPLY = "speaker_level_reply"
 CONF_ATTENUATION = "attenuation"
 CONF_CURRENT_VOLUME = "current_volume"
+CONF_ECHO_REDUCTION = "echo_reduction"
+CONF_MIC_PEAK = "mic_peak"
 
 UNIT_DB = "dB"
 UNIT_DBFS = "dBFS"
@@ -137,6 +139,19 @@ CONFIG_SCHEMA = cv.All(
                 accuracy_decimals=0,
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
+            # Diagnostics, reported after each stretch of playback (at least 1.5 s)
+            cv.Optional(CONF_ECHO_REDUCTION): sensor.sensor_schema(
+                unit_of_measurement=UNIT_DB,
+                icon="mdi:waveform",
+                accuracy_decimals=1,
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            cv.Optional(CONF_MIC_PEAK): sensor.sensor_schema(
+                unit_of_measurement=UNIT_DBFS,
+                icon="mdi:microphone-plus",
+                accuracy_decimals=1,
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
             cv.Optional(CONF_CURRENT_VOLUME): sensor.sensor_schema(
                 unit_of_measurement="%",
                 icon="mdi:volume-medium",
@@ -214,6 +229,8 @@ async def to_code(config):
         (CONF_SPEAKER_LEVEL_REPLY, var.set_speaker_level_reply_sensor),
         (CONF_ATTENUATION, var.set_attenuation_sensor),
         (CONF_CURRENT_VOLUME, var.set_current_volume_sensor),
+        (CONF_ECHO_REDUCTION, var.set_echo_reduction_sensor),
+        (CONF_MIC_PEAK, var.set_mic_peak_sensor),
     ):
         if key in config:
             sens = await sensor.new_sensor(config[key])
