@@ -25,7 +25,7 @@
 namespace esphome {
 namespace adaptive_volume {
 
-static constexpr const char *ADAPTIVE_VOLUME_VERSION = "0.2.0";
+static constexpr const char *ADAPTIVE_VOLUME_VERSION = "0.3.0";
 
 class AdaptiveVolume;
 

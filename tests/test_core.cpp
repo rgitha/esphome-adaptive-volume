@@ -164,6 +164,45 @@ int main() {
     sim.core.update_attenuation();
     CHECK(sim.core.a == 0.0f && sim.core.m == 0.0f, "disabled -> 0");
   }
+  // 9. Median of 3: one reply 10 dB too high, or 6 dB too low, does not move S;
+  //    a real change is followed after two replies.
+  {
+    Sim sim;
+    sim.idle(15);
+    for (int i = 0; i < 3; i++) {
+      sim.idle(1);
+      sim.reply(2.0, 1.0);
+    }
+    const float s0 = sim.core.s;
+    sim.s_true = -25.0;  // someone talking over this reply
+    sim.idle(1);
+    sim.reply(2.0, 1.0);
+    CHECK(std::fabs(sim.core.s - s0) < 1.0f, "high outlier moved S %.1f -> %.1f", s0, sim.core.s);
+    sim.s_true = -41.0;  // room quieter during this reply
+    sim.idle(1);
+    sim.reply(2.0, 1.0);
+    CHECK(std::fabs(sim.core.s - s0) < 1.0f, "low outlier moved S %.1f -> %.1f", s0, sim.core.s);
+    sim.s_true = -30.0;  // real change (louder speaker)
+    for (int i = 0; i < 2; i++) {
+      sim.idle(1);
+      sim.reply(2.0, 1.0);
+    }
+    CHECK(std::fabs(sim.core.s - (-30.0f)) < 1.5f, "real change followed: S %.1f", sim.core.s);
+    printf("9: outliers rejected (S %.2f), real change followed after 2 replies (S %.2f)\n", s0, sim.core.s);
+  }
+  // 10. Boot transient: the first 0.5 s reads 15 dB high; it is skipped, so the
+  //     first estimate is the room (-77), not the transient.
+  {
+    NoiseEstimator e;
+    float first = NAN;
+    for (int i = 0; i < 2; i++)
+      e.feed(-62.0f);  // first block: start-up transient
+    for (int i = 0; i < 4; i++)
+      if (e.feed(-77.0f) && std::isnan(first))
+        first = e.est;
+    CHECK(std::fabs(first - (-77.0f)) < 0.5f, "first estimate %.1f (room -77)", first);
+    printf("10: first estimate after a loud boot block = %.1f (room -77)\n", first);
+  }
   printf(failures == 0 ? "ALL PASSED\n" : "%d FAILURES\n", failures);
   return failures == 0 ? 0 : 1;
 }

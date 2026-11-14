@@ -1,6 +1,6 @@
 # esphome-adaptive-volume
 
-> Version 0.2.0: in development and testing, not released yet.
+> Version 0.3.0: in development and testing, not released yet.
 
 ESPHome external component that turns all sound down in a quiet room and back
 up when the room gets louder. It works on voice devices built on
@@ -103,7 +103,8 @@ and ignores isolated sounds:
 3. Exponential smoothing, 6 s rising, about 1.4 s falling.
 
 Only time when the device is idle (the `idle` condition) is used; otherwise the
-estimate holds.
+estimate holds. The first 1 s of idle after boot is skipped: the start-up
+transient would otherwise make the first estimate read high for several seconds.
 
 **Room level before the reply P_room,pre.** The same estimator runs on the
 processor input (mic 1, before echo cancellation), A-weighted like the room
@@ -118,7 +119,9 @@ on the A-weighted processor input, frame by frame (about 32 ms):
 - With at least 0.3 s of speech frames:
   S_k = 10·log10(mean over speech frames of (P_in − P_room,pre)) − V(v₀) + M₀,
   where V(v) is the software volume gain and M₀ the codec attenuation during
-  the reply. S is the power mean of the last up to 3 S_k.
+  the reply. S is the median of the last 3 S_k (in dB), so one reply with
+  other sound over it, or with the room quieter than before the wake word,
+  does not move it. With fewer: the one S_k, or the mean of two.
 - Close to the room, only the louder syllables pass the gate and S_k reads
   high. So when the expected speech level (from the S in use) is less than
   9 dB above the room, S_k may only lower S, never raise it.

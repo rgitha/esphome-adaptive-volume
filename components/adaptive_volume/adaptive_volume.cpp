@@ -206,7 +206,7 @@ void AdaptiveVolume::log_result_(const CalResult &r) {
     case CalResult::DETECTED:
       ESP_LOGD(TAG,
                "Speaker calibration: speech %.1f (%.2f of %.2f s), room %.1f, volume %.0f%%, attenuation %.0f dB "
-               "-> S_k %.1f%s, S %.1f (mean of %d, was %.1f)",
+               "-> S_k %.1f%s, S %.1f (median of %d, was %.1f)",
                r.in_l, r.active_s, r.seconds, r.room_l, r.v0 * 100.0f, r.m0, r.s_k,
                r.marginal ? " (marginal, lowers only)" : "", r.s_new, r.hist_n, r.s_old);
       break;

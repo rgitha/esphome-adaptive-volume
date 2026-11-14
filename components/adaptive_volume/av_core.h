@@ -22,11 +22,16 @@ namespace adaptive_volume {
 // Robust noise estimator on 250 ms levels (dBFS):
 // 0.5 s block peaks -> min(3rd largest of the last 16, max of the last 9)
 // -> exponential smoothing (6 s rising, ~1.4 s falling).
+// The first WARMUP_BLOCKS blocks after boot are skipped: the start-up transient
+// (AFE, codec) made the first block read ~15 dB high, and the estimate then
+// took ~5 s to fall from it.
 struct NoiseEstimator {
   static constexpr int BLOCK_SAMPLES = 2;
   static constexpr int N_BLOCKS = 16;
   static constexpr int RANK = 3;
   static constexpr int HOLD_BLOCKS = 9;
+  static constexpr int WARMUP_BLOCKS = 2;  // 1 s
+  int warmup = WARMUP_BLOCKS;
   float blocks[N_BLOCKS] = {};
   int n_blocks = 0, head = 0;
   float block_peak = -200.0f;
@@ -44,6 +49,11 @@ struct NoiseEstimator {
     block_peak = std::max(block_peak, level);
     if (++block_count < BLOCK_SAMPLES)
       return false;
+    if (warmup > 0) {
+      warmup--;
+      discard_partial();
+      return false;
+    }
     blocks[head] = block_peak;
     head = (head + 1) % N_BLOCKS;
     if (n_blocks < N_BLOCKS)
@@ -164,7 +174,7 @@ class Core {
   float c() const { return cfg.loudness_constant + offset; }
   bool measuring() const { return measuring_; }
 
-  // Restore a stored S (after boot): it counts as one entry of the average.
+  // Restore a stored S (after boot): it counts as one entry of the history.
   void restore_s(float value) {
     s = value;
     if (!std::isnan(value)) {
@@ -290,11 +300,16 @@ class Core {
     if (hist_n_ < HISTORY)
       hist_n_++;
   }
-  float hist_mean_() const {
-    double sum = 0;
-    for (int i = 0; i < hist_n_; i++)
-      sum += std::pow(10.0, hist_[i] / 10.0);
-    return static_cast<float>(10.0 * std::log10(sum / hist_n_));
+  // Median of the history (dB): one bad reply, too high (sound over it) or too
+  // low (room quieter than before the wake word), does not move S. With fewer
+  // than 3 entries: the one entry, or the mean of two (median of two).
+  float hist_median_() const {
+    if (hist_n_ == 1)
+      return hist_[0];
+    if (hist_n_ == 2)
+      return 0.5f * (hist_[0] + hist_[1]);
+    const float a = hist_[0], b = hist_[1], c = hist_[2];
+    return std::max(std::min(a, b), std::min(std::max(a, b), c));
   }
 
   CalResult evaluate_() {
@@ -349,7 +364,7 @@ class Core {
       r.kind = CalResult::DETECTED;
       push_hist_(r.s_k);
       r.hist_n = hist_n_;
-      s = hist_mean_();
+      s = hist_median_();
       r.s_new = s;
       return r;
     }

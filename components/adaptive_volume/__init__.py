@@ -18,7 +18,7 @@ from esphome.const import (
     STATE_CLASS_MEASUREMENT,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 CODEOWNERS = ["@rgitha"]
 DEPENDENCIES = ["esp_audio_stack", "media_player"]
