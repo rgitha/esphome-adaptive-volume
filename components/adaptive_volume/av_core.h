@@ -129,7 +129,8 @@ struct XCorr {
     }
   }
   struct Result {
-    float coherent_db{NAN};  // mic power coherent with the reference (dBFS)
+    float gain_db{NAN};      // path gain reference -> mic at the peak lag (dB)
+    float coherent_db{NAN};  // mic power coherent with the reference at the peak lag (dBFS)
     float mic_db{NAN};       // all mic power over the same frames (dBFS)
     float ref_db{NAN};       // reference power over the same frames (dBFS)
     float rho{NAN};          // correlation coefficient at the peak lag
@@ -139,15 +140,19 @@ struct XCorr {
     Result r;
     if (n == 0 || rxx <= 0.0 || ryy <= 0.0)
       return r;
-    double coh = 0.0, best = 0.0;
+    // Single peak lag: summing over lags would count the same energy several times
+    // (speech and the speaker ring, so neighbouring lags correlate), by an amount
+    // that depends on the voice.
+    double best = 0.0;
     for (int t = 0; t < LAGS; t++) {
-      coh += rxy[t] * rxy[t];
       if (std::fabs(rxy[t]) > best) {
         best = std::fabs(rxy[t]);
         r.lag = t;
       }
     }
-    coh /= rxx * n;
+    const double g = best / rxx;
+    r.gain_db = g > 1e-7 ? static_cast<float>(20.0 * std::log10(g)) : -140.0f;
+    const double coh = best * best / (rxx * n);
     r.coherent_db = coh > 1e-13 ? static_cast<float>(10.0 * std::log10(coh)) : -130.0f;
     r.mic_db = static_cast<float>(10.0 * std::log10(ryy / n + 1e-13));
     r.ref_db = static_cast<float>(10.0 * std::log10(rxx / n + 1e-13));
@@ -267,6 +272,14 @@ struct EchoMeter {
 
 struct CoreConfig {
   float sample_rate{16000.0f};      // rate of the blocks fed (processor input / output)
+  // Path mode (0.4.0): S = P + analog_gain_db, P = reference -> mic path gain from
+  // the cross-correlation. How loud the played sound is, is not measured: C (loudness
+  // above the room) assumes the speaker output OUTPUT_LEVEL_DB below full scale, so S
+  // does not follow individual sounds; C is set by ear as a whole. Off: S from S_k
+  // (as before).
+  bool use_path{false};
+  float analog_gain_db{0.0f};       // mic/reference analogue gain (N follows it, P does not)
+  float path_gain_nominal{-9.0f};   // P before the first measurement
   float speaker_level_nominal{-30.0f};
   float loudness_constant{20.0f};
   float max_attenuation{30.0f};
@@ -315,8 +328,49 @@ class Core {
     const float x = cfg.media_volume_min + (cfg.media_volume_max - cfg.media_volume_min) * v;
     return cfg.software_volume_min_db * (1.0f - x);
   }
-  float s_use() const { return std::isnan(s) ? cfg.speaker_level_nominal : s; }
-  float c() const { return cfg.loudness_constant + offset; }
+  float s_use() const {
+    if (cfg.use_path)
+      return s_from_p(std::isnan(p) ? cfg.path_gain_nominal : p);
+    return std::isnan(s) ? cfg.speaker_level_nominal : s;
+  }
+  float s_from_p(float path) const { return path + cfg.analog_gain_db; }
+
+  // ---- path mode: P history (median of the last P_HISTORY accepted replies) ----
+  static constexpr int P_HISTORY = 5;
+  float p{NAN};  // path gain reference -> mic (dB), NAN = never measured
+  void restore_p(float value) {
+    p = value;
+    if (!std::isnan(value)) {
+      p_hist_[0] = value;
+      p_n_ = 1;
+      p_head_ = 1 % P_HISTORY;
+    }
+  }
+  void push_p(float pk) {
+    p_hist_[p_head_] = pk;
+    p_head_ = (p_head_ + 1) % P_HISTORY;
+    if (p_n_ < P_HISTORY)
+      p_n_++;
+    float v[P_HISTORY];
+    for (int i = 0; i < p_n_; i++) {  // insertion sort (tiny)
+      float x = p_hist_[i];
+      int j = i - 1;
+      while (j >= 0 && v[j] > x) {
+        v[j + 1] = v[j];
+        j--;
+      }
+      v[j + 1] = x;
+    }
+    p = (p_n_ % 2) ? v[p_n_ / 2] : 0.5f * (v[p_n_ / 2 - 1] + v[p_n_ / 2]);
+  }
+  int p_count() const { return p_n_; }
+  // Path mode: speaker output level assumed by C, in dB below full scale at the
+  // speaker reference (0 dB analogue gain, full volume, no attenuation). It applies to
+  // whatever is played (speech, music, chimes): typical material at full volume sits
+  // about 45 dB below the reference's full scale. S = P + gain is a path gain, not a
+  // level, so this output level is added to C here; C stays loudness above the room.
+  static constexpr float OUTPUT_LEVEL_DB = 45.0f;
+  float c() const { return cfg.loudness_constant + offset + (cfg.use_path ? OUTPUT_LEVEL_DB : 0.0f); }
   bool measuring() const { return measuring_; }
 
   // Restore a stored S (after boot): it counts as one entry of the history.
@@ -461,7 +515,8 @@ class Core {
     CalResult r;
     r.v0 = v0_;
     r.m0 = m0_;
-    r.s_old = s_use();
+    // S_k's own estimate (in path mode S is not a level, and S_k is a diagnostic)
+    r.s_old = cfg.use_path ? (std::isnan(s) ? cfg.speaker_level_nominal : s) : s_use();
     r.seconds = r_n_ / cfg.sample_rate;
     r.kind = CalResult::SKIPPED;
     if (changed_) {
@@ -545,6 +600,8 @@ class Core {
   float v0_{0}, m0_{0};
   float hist_[HISTORY] = {};
   int hist_n_{0}, hist_head_{0};
+  float p_hist_[P_HISTORY] = {};
+  int p_n_{0}, p_head_{0};
 };
 
 }  // namespace adaptive_volume

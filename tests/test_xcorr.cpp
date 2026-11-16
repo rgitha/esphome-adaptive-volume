@@ -1,6 +1,6 @@
 // Host test for XCorr (coherent speaker level): g++ -std=c++17 -O2 -I../components/adaptive_volume test_xcorr.cpp && ./a.out
 // Mic = gain x delayed reference (+ one weak reflection) + uncorrelated "talking".
-// The coherent level must follow the reply path, not the talking.
+// The path gain and the coherent level must follow the reply path, not the talking.
 #include <cassert>
 #include <cmath>
 #include <cstdio>
@@ -47,11 +47,14 @@ int main() {
   printf("clean:        coherent %.2f mic %.2f ref %.2f rho %.2f lag %d\n", clean.coherent_db, clean.mic_db,
          clean.ref_db, clean.rho, clean.lag);
   assert(clean.lag == 3);
+  printf("clean:        path gain %.2f dB (true -20.00)\n", clean.gain_db);
+  assert(std::fabs(clean.gain_db - (-20.0f)) < 0.5f);
   for (float talk : {-20.0f, -10.0f, 0.0f}) {
     const XCorr::Result r = run(0.1f, 3, talk, 2);
     printf("talk %+5.0f dB: coherent %.2f mic %.2f rho %.2f lag %d (shift %+.2f dB)\n", talk, r.coherent_db, r.mic_db,
            r.rho, r.lag, r.coherent_db - clean.coherent_db);
     assert(std::fabs(r.coherent_db - clean.coherent_db) < 1.0f);
+    assert(std::fabs(r.gain_db - clean.gain_db) < 1.0f);
   }
   for (int d : {0, 5, 8, 20, 32}) {
     const XCorr::Result r = run(0.1f, d, -60.0f, 3);

@@ -1,6 +1,6 @@
 # esphome-adaptive-volume
 
-> Version 0.3.3: in development and testing, not released yet.
+> Version 0.4.0 (branch coherent-s): experimental.
 
 ESPHome external component that turns all sound down in a quiet room and back
 up when the room gets louder. It works on voice devices built on
@@ -148,16 +148,24 @@ C = loudness_constant + offset. A follows A_t in whole dB when it moves by
 `hysteresis` or more (0 below 0.5 dB). The codec gets M = max(0, A − B), B
 being the announcement offset.
 
-**Coherent speaker level (diagnostic, 0.3.3).** During a reply, the A-weighted
-speaker reference x (after volume and codec attenuation) and mic 1 y are
+**Path mode (0.4.0, set `analog_gain`).** S = P + `analog_gain`, and
+A = S − N − C as before. P is the path gain from the speaker reference (after
+volume and codec attenuation) to mic 1: during each reply both are A-weighted and
 cross-correlated over the frames where the reference carries speech (20 dB above
-its idle floor). The mic power coherent with the reference,
-Σ_τ R_xy(τ)² / (R_xx · n) over lags 0–2 ms (amplifier, speaker and air), is the reply's own level at the mic:
-talking and room noise do not correlate with x, so they add scatter but no bias.
-Normalised like S_k (− volume, + codec attenuation) it gives S_coh, logged and
-published next to S_k (`speaker_level_coherent`); S does not use it yet. Summing
-over neighbouring lags reads a constant ~2 dB high for speech (its own
-correlation), the same on every reply.
+its idle floor), lags 0–2 ms; P_k = 20·log10(|R_xy(τ*)| / R_xx) at the peak lag
+τ*. Talking and room noise do not correlate with the reference, so they add
+scatter but no bias, and the reply's own loudness cancels out. A reply counts
+when ρ ≥ 0.5, the peak is inside the window and there is at least 0.3 s of
+reference speech; P is the median of the last 5 (stored in flash, −9 dB before
+the first). How loud the played sound is, is not measured into S: C (loudness
+above the room) assumes the speaker output 45 dB below full scale at the
+reference (full volume, no attenuation, 0 dB analogue gain), for whatever is
+played: speech, music or chimes. The code adds that to C, and C is set as a whole
+by ear. A louder or quieter sound or voice plays louder or quieter; evening out
+voices belongs to the TTS setup. `analog_gain` is the mic and reference analogue
+gain: N follows it, P does not. Sensors `path_gain` (P) and `path_gain_reply`
+(each reply); the log also gives each reply's level at the reference. S_k is still
+measured and logged (diagnostic).
 
 **Echo reduction (diagnostic).** Over each stretch of playback (media player
 playing or announcing, at least 1.5 s): the A-weighted level of mic 1 before

@@ -18,7 +18,7 @@ from esphome.const import (
     STATE_CLASS_MEASUREMENT,
 )
 
-__version__ = "0.3.3"
+__version__ = "0.4.0"
 
 CODEOWNERS = ["@rgitha"]
 DEPENDENCIES = ["esp_audio_stack", "media_player"]
@@ -29,6 +29,7 @@ CONF_IDLE = "idle"
 CONF_REPLY = "reply"
 CONF_BLOCKED = "blocked"
 CONF_SPEAKER_LEVEL_NOMINAL = "speaker_level_nominal"
+CONF_ANALOG_GAIN = "analog_gain"
 CONF_LOUDNESS_CONSTANT = "loudness_constant"
 CONF_MAX_ATTENUATION = "max_attenuation"
 CONF_HYSTERESIS = "hysteresis"
@@ -43,7 +44,8 @@ CONF_OFFSET = "offset"
 CONF_ROOM_NOISE = "room_noise"
 CONF_SPEAKER_LEVEL = "speaker_level"
 CONF_SPEAKER_LEVEL_REPLY = "speaker_level_reply"
-CONF_SPEAKER_LEVEL_COHERENT = "speaker_level_coherent"
+CONF_PATH_GAIN = "path_gain"
+CONF_PATH_GAIN_REPLY = "path_gain_reply"
 CONF_ATTENUATION = "attenuation"
 CONF_CURRENT_VOLUME = "current_volume"
 CONF_ECHO_REDUCTION = "echo_reduction"
@@ -81,6 +83,11 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_SPEAKER_LEVEL_NOMINAL, default=-30.0): cv.float_range(
                 min=-90.0, max=0.0
             ),
+            # Path mode (0.4.0), on when analog_gain is set: S = path gain (cross-
+            # correlation of the speaker reference and mic 1) + analog_gain; the
+            # loudness constant assumes the speaker output 45 dB below full scale at the
+            # reference. Without it, S comes from the reply levels (S_k) as before.
+            cv.Optional(CONF_ANALOG_GAIN): cv.float_range(min=0.0, max=40.0),
             cv.Optional(CONF_LOUDNESS_CONSTANT, default=20.0): cv.float_range(
                 min=-20.0, max=60.0
             ),
@@ -134,10 +141,15 @@ CONFIG_SCHEMA = cv.All(
                 accuracy_decimals=1,
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
-            # Diagnostic (v0.3.3): S_k from the mic power coherent with the speaker
-            # reference (talking and room noise excluded); S does not use it yet.
-            cv.Optional(CONF_SPEAKER_LEVEL_COHERENT): sensor.sensor_schema(
-                unit_of_measurement=UNIT_DBFS,
+            # Path mode: path gain P (median) and the last reply's path gain
+            cv.Optional(CONF_PATH_GAIN): sensor.sensor_schema(
+                unit_of_measurement=UNIT_DB,
+                icon="mdi:speaker-wireless",
+                accuracy_decimals=1,
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            cv.Optional(CONF_PATH_GAIN_REPLY): sensor.sensor_schema(
+                unit_of_measurement=UNIT_DB,
                 icon="mdi:speaker-message",
                 accuracy_decimals=1,
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
@@ -203,6 +215,8 @@ async def to_code(config):
             cg.add(setter(lam))
 
     cg.add(var.set_speaker_level_nominal(config[CONF_SPEAKER_LEVEL_NOMINAL]))
+    if CONF_ANALOG_GAIN in config:
+        cg.add(var.set_path_mode(config[CONF_ANALOG_GAIN]))
     cg.add(var.set_loudness_constant(config[CONF_LOUDNESS_CONSTANT]))
     cg.add(var.set_max_attenuation(config[CONF_MAX_ATTENUATION]))
     cg.add(var.set_hysteresis(config[CONF_HYSTERESIS]))
@@ -236,7 +250,8 @@ async def to_code(config):
         (CONF_ROOM_NOISE, var.set_room_noise_sensor),
         (CONF_SPEAKER_LEVEL, var.set_speaker_level_sensor),
         (CONF_SPEAKER_LEVEL_REPLY, var.set_speaker_level_reply_sensor),
-        (CONF_SPEAKER_LEVEL_COHERENT, var.set_speaker_level_coherent_sensor),
+        (CONF_PATH_GAIN, var.set_path_gain_sensor),
+        (CONF_PATH_GAIN_REPLY, var.set_path_gain_reply_sensor),
         (CONF_ATTENUATION, var.set_attenuation_sensor),
         (CONF_CURRENT_VOLUME, var.set_current_volume_sensor),
         (CONF_ECHO_REDUCTION, var.set_echo_reduction_sensor),

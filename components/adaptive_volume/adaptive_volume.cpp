@@ -16,6 +16,9 @@ namespace adaptive_volume {
 
 static const char *const TAG = "adaptive_volume";
 static constexpr uint32_t S_PREF_HASH = 0x5A7E1D0Bu;
+static constexpr uint32_t P_PREF_HASH = 0x5A7E1D0Cu;  // path gain P (0.4.0)
+// Path-mode acceptance of one reply
+static constexpr float P_MIN_RHO = 0.5f;
 static constexpr uint32_t REPORT_INTERVAL_MS = 10000;
 
 #ifdef USE_SWITCH
@@ -55,15 +58,29 @@ void AdaptiveVolume::setup() {
       }
     });
   }
-  this->s_pref_ = global_preferences->make_preference<float>(S_PREF_HASH);
-  float stored = NAN;
-  if (this->s_pref_.load(&stored) && std::isfinite(stored)) {
-    this->core_.restore_s(stored);
-    this->saved_s_ = stored;
+  if (this->core_.cfg.use_path) {
+    // Path mode: P is stored; the S_k median (diagnostic) starts fresh
+    this->p_pref_ = global_preferences->make_preference<float>(P_PREF_HASH);
+    float stored = NAN;
+    if (this->p_pref_.load(&stored) && std::isfinite(stored)) {
+      this->core_.restore_p(stored);
+      this->saved_p_ = stored;
+    }
+  } else {
+    this->s_pref_ = global_preferences->make_preference<float>(S_PREF_HASH);
+    float stored = NAN;
+    if (this->s_pref_.load(&stored) && std::isfinite(stored)) {
+      this->core_.restore_s(stored);
+      this->saved_s_ = stored;
+    }
   }
 #ifdef USE_SENSOR
-  if (this->speaker_level_sensor_ != nullptr && !std::isnan(this->core_.s))
+  if (this->core_.cfg.use_path) {
+    if (this->path_gain_sensor_ != nullptr && !std::isnan(this->core_.p))
+      this->path_gain_sensor_->publish_state(this->core_.p);
+  } else if (this->speaker_level_sensor_ != nullptr && !std::isnan(this->core_.s)) {
     this->speaker_level_sensor_->publish_state(this->core_.s);
+  }
 #endif
 #ifdef USE_NUMBER
   if (this->offset_number_ != nullptr)
@@ -91,12 +108,14 @@ void AdaptiveVolume::dump_config() {
                 "  Loudness constant: %.1f dB, max attenuation %.1f dB, hysteresis %.1f dB\n"
                 "  Master curve min: %.1f dB, software volume min: %.1f dB, media volume %.2f..%.2f\n"
                 "  Reply: start delay %" PRIu32 " ms, minimum %.2f s\n"
-                "  Sample rate: %.0f Hz",
+                "  Sample rate: %.0f Hz\n"
+                "  Path mode: %s (analogue gain %.1f dB, P %.1f dB stored)",
                 ADAPTIVE_VOLUME_VERSION, this->core_.cfg.speaker_level_nominal, this->core_.s, this->core_.cfg.loudness_constant,
                 this->core_.cfg.max_attenuation, this->core_.cfg.hysteresis, this->master_min_db_,
                 this->core_.cfg.software_volume_min_db, this->core_.cfg.media_volume_min,
                 this->core_.cfg.media_volume_max, this->core_.cfg.reply_start_delay_us / 1000u,
-                this->core_.cfg.reply_min_duration_s, this->core_.cfg.sample_rate);
+                this->core_.cfg.reply_min_duration_s, this->core_.cfg.sample_rate, YESNO(this->core_.cfg.use_path),
+                this->core_.cfg.analog_gain_db, this->core_.p);
 }
 
 // ---------------------------------------------------------------- audio task
@@ -211,7 +230,7 @@ void AdaptiveVolume::on_reference_frame_(const esp_audio_stack::CaptureFrame &fr
 
 // Coherent speaker level, logged next to the regular measurement (diagnostic only:
 // S is not changed by it).
-void AdaptiveVolume::log_coherent_(const CalResult &r) {
+bool AdaptiveVolume::log_coherent_(const CalResult &r, float *path_db) {
   XCorr::Result x;
   uint16_t peak;
   char profile[(XCorr::LAGS / 4 + 1) * 7 + 1];
@@ -228,23 +247,34 @@ void AdaptiveVolume::log_coherent_(const CalResult &r) {
     peak = this->xc_ref_peak_;
     this->xc_.reset();
     this->xc_ref_peak_ = 0;
-    if (std::isnan(x.coherent_db) || seconds < this->core_.cfg.active_min_duration_s) {
-      ESP_LOGD(TAG, "Coherent: too little reference speech (%.2f s)", seconds);
-      return;
+    if (std::isnan(x.gain_db) || seconds < this->core_.cfg.active_min_duration_s) {
+      ESP_LOGD(TAG, "Path: too little reference speech (%.2f s), not counted", seconds);
+      return false;
     }
-    ESP_LOGD(TAG, "Coherent: %.2f s of reference speech", seconds);
   }
   const float peak_db = peak > 0 ? 20.0f * std::log10(peak / 32768.0f) : -96.0f;
-  const float s_coh = x.coherent_db - this->core_.v_db(r.v0) + r.m0;
+  // Reply level at the reference, normalised like S_k (volume and attenuation removed,
+  // at 0 dB analogue gain): shows how loud each voice plays
+  const float reply_ref = x.ref_db - this->core_.v_db(r.v0) + r.m0 - this->core_.cfg.analog_gain_db;
   ESP_LOGD(TAG,
-           "Coherent: mic %.1f, coherent %.1f, ref %.1f dBFS, rho %.2f at lag %d, ref peak %.1f dBFS -> S_coh %.1f "
-           "(S_k %.1f)",
-           x.mic_db, x.coherent_db, x.ref_db, x.rho, x.lag, peak_db, s_coh, r.s_k);
-  ESP_LOGD(TAG, "Coherent: correlation at lags 0, 4 .. %d:%s", XCorr::LAGS - 1, profile);
+           "Path: gain %.1f dB at lag %d, rho %.2f (mic %.1f, coherent %.1f, ref %.1f dBFS, ref peak %.1f dBFS); "
+           "reply level %.1f dBFS at the reference",
+           x.gain_db, x.lag, x.rho, x.mic_db, x.coherent_db, x.ref_db, peak_db, reply_ref);
+  ESP_LOGD(TAG, "Path: correlation at lags 0, 4 .. %d:%s", XCorr::LAGS - 1, profile);
+  if (x.rho < P_MIN_RHO) {
+    ESP_LOGD(TAG, "Path: rho below %.2f, not counted", P_MIN_RHO);
+    return false;
+  }
+  if (x.lag <= 0 || x.lag >= XCorr::LAGS - 1) {
+    ESP_LOGD(TAG, "Path: peak at the edge of the lag window, not counted");
+    return false;
+  }
+  *path_db = x.gain_db;
 #ifdef USE_SENSOR
-  if (this->speaker_level_coherent_sensor_ != nullptr)
-    this->speaker_level_coherent_sensor_->publish_state(s_coh);
+  if (this->path_gain_reply_sensor_ != nullptr)
+    this->path_gain_reply_sensor_->publish_state(x.gain_db);
 #endif
+  return true;
 }
 
 // ---------------------------------------------------------------- main loop
@@ -297,8 +327,31 @@ void AdaptiveVolume::loop() {
   this->xc_on_.store(xc_measuring, std::memory_order_relaxed);
   if (r.kind != CalResult::NONE) {
     this->log_result_(r);
-    this->log_coherent_(r);
-    if (r.kind == CalResult::DETECTED || r.kind == CalResult::LOWERED) {
+    float path_db = NAN;
+    const bool path_ok = this->log_coherent_(r, &path_db);
+    if (this->core_.cfg.use_path) {
+#ifdef USE_SENSOR
+      if (r.kind == CalResult::DETECTED && this->speaker_level_reply_sensor_ != nullptr)
+        this->speaker_level_reply_sensor_->publish_state(r.s_k);
+#endif
+      if (path_ok) {
+        const float s_old = this->core_.s_use();
+        this->core_.push_p(path_db);
+        ESP_LOGD(TAG, "Path: P %.1f dB (median of %d) -> S %.1f (was %.1f)", this->core_.p, this->core_.p_count(),
+                 this->core_.s_use(), s_old);
+        float p = this->core_.p;
+        // Flash only when P moved by 0.5 dB or more since the last save
+        if (std::isnan(this->saved_p_) || std::fabs(p - this->saved_p_) >= 0.5f) {
+          this->p_pref_.save(&p);
+          this->saved_p_ = p;
+        }
+#ifdef USE_SENSOR
+        if (this->path_gain_sensor_ != nullptr)
+          this->path_gain_sensor_->publish_state(this->core_.p);
+#endif
+        this->apply_(false);
+      }
+    } else if (r.kind == CalResult::DETECTED || r.kind == CalResult::LOWERED) {
       float s = this->core_.s;
       // Flash only when S moved by 1 dB or more since the last save
       if (std::isnan(this->saved_s_) || std::fabs(s - this->saved_s_) >= 1.0f) {
@@ -352,7 +405,7 @@ void AdaptiveVolume::log_result_(const CalResult &r) {
     case CalResult::DETECTED:
       ESP_LOGD(TAG,
                "Speaker calibration: speech %.1f (%.2f of %.2f s), room %.1f, volume %.0f%%, attenuation %.0f dB "
-               "-> S_k %.1f%s, S %.1f (median of %d, was %.1f)",
+               "-> S_k %.1f%s, S_k median %.1f (of %d, S in use %.1f)",
                r.in_l, r.active_s, r.seconds, r.room_l, r.v0 * 100.0f, r.m0, r.s_k,
                r.marginal ? " (marginal, lowers only)" : "", r.s_new, r.hist_n, r.s_old);
       break;

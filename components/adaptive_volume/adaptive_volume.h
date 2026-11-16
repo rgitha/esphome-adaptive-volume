@@ -25,7 +25,7 @@
 namespace esphome {
 namespace adaptive_volume {
 
-static constexpr const char *ADAPTIVE_VOLUME_VERSION = "0.3.3";
+static constexpr const char *ADAPTIVE_VOLUME_VERSION = "0.4.0";
 
 class AdaptiveVolume;
 
@@ -75,6 +75,10 @@ class AdaptiveVolume : public Component, public esp_audio_stack::AudioCaptureObs
   void set_reply_lambda(std::function<bool()> &&f) { this->reply_f_ = std::move(f); }
   void set_blocked_lambda(std::function<bool()> &&f) { this->blocked_f_ = std::move(f); }
   void set_speaker_level_nominal(float v) { this->core_.cfg.speaker_level_nominal = v; }
+  void set_path_mode(float analog_gain_db) {
+    this->core_.cfg.use_path = true;
+    this->core_.cfg.analog_gain_db = analog_gain_db;
+  }
   void set_loudness_constant(float v) { this->core_.cfg.loudness_constant = v; }
   void set_max_attenuation(float v) { this->core_.cfg.max_attenuation = v; }
   void set_hysteresis(float v) { this->core_.cfg.hysteresis = v; }
@@ -90,7 +94,8 @@ class AdaptiveVolume : public Component, public esp_audio_stack::AudioCaptureObs
   void set_room_noise_sensor(sensor::Sensor *s) { this->room_noise_sensor_ = s; }
   void set_speaker_level_sensor(sensor::Sensor *s) { this->speaker_level_sensor_ = s; }
   void set_speaker_level_reply_sensor(sensor::Sensor *s) { this->speaker_level_reply_sensor_ = s; }
-  void set_speaker_level_coherent_sensor(sensor::Sensor *s) { this->speaker_level_coherent_sensor_ = s; }
+  void set_path_gain_sensor(sensor::Sensor *s) { this->path_gain_sensor_ = s; }
+  void set_path_gain_reply_sensor(sensor::Sensor *s) { this->path_gain_reply_sensor_ = s; }
   void set_echo_reduction_sensor(sensor::Sensor *s) { this->echo_reduction_sensor_ = s; }
   void set_mic_peak_sensor(sensor::Sensor *s) { this->mic_peak_sensor_ = s; }
   void set_attenuation_sensor(sensor::Sensor *s) { this->attenuation_sensor_ = s; }
@@ -132,7 +137,7 @@ class AdaptiveVolume : public Component, public esp_audio_stack::AudioCaptureObs
 
   // Coherent speaker level (diagnostic, v0.3.3): the mic frame (A-weighted, mic 1)
   // arrives before the reference frame of the same audio-task cycle.
-  void log_coherent_(const CalResult &r);
+  bool log_coherent_(const CalResult &r, float *path_db);
   static constexpr uint32_t XC_MAX = 1024;
   float xc_y_[XC_MAX]{}, xc_x_[XC_MAX]{};
   uint32_t xc_y_n_{0};
@@ -143,6 +148,8 @@ class AdaptiveVolume : public Component, public esp_audio_stack::AudioCaptureObs
   std::atomic<bool> xc_on_{false};  // set by the main loop while a reply is measured
   Mutex xc_lock_;
   float saved_s_{NAN};
+  float saved_p_{NAN};
+  ESPPreferenceObject p_pref_;
 
   static constexpr uint32_t RING = 128;
   Block ring_[RING];
@@ -160,7 +167,8 @@ class AdaptiveVolume : public Component, public esp_audio_stack::AudioCaptureObs
   sensor::Sensor *room_noise_sensor_{nullptr};
   sensor::Sensor *speaker_level_sensor_{nullptr};
   sensor::Sensor *speaker_level_reply_sensor_{nullptr};
-  sensor::Sensor *speaker_level_coherent_sensor_{nullptr};
+  sensor::Sensor *path_gain_sensor_{nullptr};
+  sensor::Sensor *path_gain_reply_sensor_{nullptr};
   sensor::Sensor *echo_reduction_sensor_{nullptr};
   sensor::Sensor *mic_peak_sensor_{nullptr};
   sensor::Sensor *attenuation_sensor_{nullptr};
