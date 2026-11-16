@@ -1,6 +1,6 @@
 # esphome-adaptive-volume
 
-> Version 0.3.1: in development and testing, not released yet.
+> Version 0.3.2: in development and testing, not released yet.
 
 ESPHome external component that turns all sound down in a quiet room and back
 up when the room gets louder. It works on voice devices built on
@@ -97,7 +97,8 @@ together with `esp_audio_capture`.
 
 Symbols: P = power, L = 10·log10(P) in dBFS.
 
-**Room noise N_A.** The processed (AFE) output is A-weighted (approximately:
+**Room noise N_A.** The processed (AFE) output, before the audio stack's Mic
+Gain trim, is A-weighted (approximately:
 2nd-order high-pass at 200 Hz plus 1st-order at 500 Hz) and its RMS is taken
 over 250 ms. A robust estimator then follows noise you would have to talk over
 and ignores isolated sounds:
@@ -149,7 +150,7 @@ being the announcement offset.
 
 **Echo reduction (diagnostic).** Over each stretch of playback (media player
 playing or announcing, at least 1.5 s): the A-weighted level of mic 1 before
-echo cancellation and of the processed output, each with its room level
+echo cancellation and of the processed output (before the Mic Gain trim), each with its room level
 subtracted. Echo reduction = input echo − output residual, in dB; reported when
 the input is at least 15 dB above the room, as a lower bound when the output
 stays at its room level. Talking during playback lowers it. `mic_peak` is the

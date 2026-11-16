@@ -103,7 +103,7 @@ void AdaptiveVolume::dump_config() {
 
 bool AdaptiveVolume::capture_active(esp_audio_stack::CapturePoint point) const {
   return point == esp_audio_stack::CapturePoint::PROCESSOR_INPUT ||
-         point == esp_audio_stack::CapturePoint::OUTPUT;
+         point == esp_audio_stack::CapturePoint::PROCESSOR_OUTPUT;
 }
 
 void AdaptiveVolume::push_(const Block &b) {
@@ -136,7 +136,9 @@ void AdaptiveVolume::on_capture_frame(const esp_audio_stack::CaptureFrame &frame
       for (size_t c = 0; c < ch; c++)
         pk = std::max<int32_t>(pk, std::abs(static_cast<int32_t>(smp[i * stride + c])));
     b.peak = static_cast<uint16_t>(std::min<int32_t>(pk, 65535));
-  } else if (frame.point == esp_audio_stack::CapturePoint::OUTPUT) {
+  } else if (frame.point == esp_audio_stack::CapturePoint::PROCESSOR_OUTPUT) {
+    // AFE output before the stack's Mic Gain trim, so the trim (which S at mic 1
+    // does not see) cannot shift N against S, nor the echo reduction.
     w = &this->aw_out_;  // processed output (room noise)
     b.point = 1;
   } else {
