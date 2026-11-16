@@ -16,9 +16,11 @@ namespace adaptive_volume {
 
 static const char *const TAG = "adaptive_volume";
 static constexpr uint32_t S_PREF_HASH = 0x5A7E1D0Bu;
-static constexpr uint32_t P_PREF_HASH = 0x5A7E1D0Cu;  // path gain P (0.4.0)
-// Path-mode acceptance of one reply
-static constexpr float P_MIN_RHO = 0.5f;
+static constexpr uint32_t P_PREF_HASH = 0x5A7E1D0Du;  // path gain P, cross-spectral (0.4.1)
+// Path-mode acceptance of one reply (cross-spectral estimate)
+static constexpr int P_MIN_WINDOWS = 10;           // 10 windows of 32 ms (50 % overlap)
+static constexpr float P_MIN_COVERAGE = 0.6f;      // share of the weighting excited by the sound
+static constexpr float P_MIN_COHERENCE = 0.2f;     // weighted mean coherence
 static constexpr uint32_t REPORT_INTERVAL_MS = 10000;
 
 #ifdef USE_SWITCH
@@ -59,6 +61,9 @@ void AdaptiveVolume::setup() {
     });
   }
   if (this->core_.cfg.use_path) {
+    RAMAllocator<float> allocator;  // PSRAM first
+    if (!this->sp_.attach(allocator.allocate(SpectralPath::MEM_FLOATS)))
+      ESP_LOGE(TAG, "Could not allocate the path estimator; S stays at the nominal path gain");
     // Path mode: P is stored; the S_k median (diagnostic) starts fresh
     this->p_pref_ = global_preferences->make_preference<float>(P_PREF_HASH);
     float stored = NAN;
@@ -221,10 +226,13 @@ void AdaptiveVolume::on_reference_frame_(const esp_audio_stack::CaptureFrame &fr
   LockGuard guard(this->xc_lock_);
   if (on)
     this->xc_ref_peak_ = static_cast<uint16_t>(std::max<int32_t>(this->xc_ref_peak_, std::min<int32_t>(pk, 65535)));
-  if (matched)
+  if (matched) {
     this->xc_.add(this->xc_x_, this->xc_y_, len, speech);
-  else
+    if (on)
+      this->sp_.push(this->xc_x_, this->xc_y_, len, speech);
+  } else {
     this->xc_.clear_history();
+  }
   this->xc_y_n_ = 0;
 }
 
@@ -232,11 +240,13 @@ void AdaptiveVolume::on_reference_frame_(const esp_audio_stack::CaptureFrame &fr
 // S is not changed by it).
 bool AdaptiveVolume::log_coherent_(const CalResult &r, float *path_db) {
   XCorr::Result x;
+  SpectralPath::Result sp;
   uint16_t peak;
   char profile[(XCorr::LAGS / 4 + 1) * 7 + 1];
   {
     LockGuard guard(this->xc_lock_);
     x = this->xc_.result();
+    sp = this->sp_.result(this->core_.cfg.sample_rate);
     // Coarse lag profile (normalised correlation every 4th lag), to locate the peak
     size_t len = 0;
     profile[0] = '\0';
@@ -257,22 +267,27 @@ bool AdaptiveVolume::log_coherent_(const CalResult &r, float *path_db) {
   // at 0 dB analogue gain): shows how loud each voice plays
   const float reply_ref = x.ref_db - this->core_.v_db(r.v0) + r.m0 - this->core_.cfg.analog_gain_db;
   ESP_LOGD(TAG,
-           "Path: gain %.1f dB at lag %d, rho %.2f (mic %.1f, coherent %.1f, ref %.1f dBFS, ref peak %.1f dBFS); "
-           "reply level %.1f dBFS at the reference",
-           x.gain_db, x.lag, x.rho, x.mic_db, x.coherent_db, x.ref_db, peak_db, reply_ref);
-  ESP_LOGD(TAG, "Path: correlation at lags 0, 4 .. %d:%s", XCorr::LAGS - 1, profile);
-  if (x.rho < P_MIN_RHO) {
-    ESP_LOGD(TAG, "Path: rho below %.2f, not counted", P_MIN_RHO);
+           "Path: %.1f dB (coverage %.2f, coherence %.2f, %d windows); single lag %.1f dB at lag %d, rho %.2f "
+           "(mic %.1f, ref %.1f dBFS, ref peak %.1f dBFS); reply level %.1f dBFS at the reference",
+           sp.p_db, sp.coverage, sp.coherence, sp.windows, x.gain_db, x.lag, x.rho, x.mic_db, x.ref_db, peak_db,
+           reply_ref);
+  ESP_LOGD(TAG, "Path: single-lag correlation at lags 0, 4 .. %d:%s", XCorr::LAGS - 1, profile);
+  if (std::isnan(sp.p_db) || sp.windows < P_MIN_WINDOWS) {
+    ESP_LOGD(TAG, "Path: too few windows with sound, not counted");
     return false;
   }
-  if (x.lag <= 0 || x.lag >= XCorr::LAGS - 1) {
-    ESP_LOGD(TAG, "Path: peak at the edge of the lag window, not counted");
+  if (sp.coverage < P_MIN_COVERAGE) {
+    ESP_LOGD(TAG, "Path: the sound covers too little of the band (%.2f), not counted", sp.coverage);
     return false;
   }
-  *path_db = x.gain_db;
+  if (sp.coherence < P_MIN_COHERENCE) {
+    ESP_LOGD(TAG, "Path: coherence too low (%.2f; talking or noise), not counted", sp.coherence);
+    return false;
+  }
+  *path_db = sp.p_db;
 #ifdef USE_SENSOR
   if (this->path_gain_reply_sensor_ != nullptr)
-    this->path_gain_reply_sensor_->publish_state(x.gain_db);
+    this->path_gain_reply_sensor_->publish_state(sp.p_db);
 #endif
   return true;
 }
@@ -322,6 +337,7 @@ void AdaptiveVolume::loop() {
   if (xc_measuring && !this->xc_on_.load(std::memory_order_relaxed)) {
     LockGuard guard(this->xc_lock_);  // a new reply: start from zero
     this->xc_.reset();
+    this->sp_.reset();
     this->xc_ref_peak_ = 0;
   }
   this->xc_on_.store(xc_measuring, std::memory_order_relaxed);

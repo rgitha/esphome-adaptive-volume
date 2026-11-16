@@ -161,6 +161,171 @@ struct XCorr {
   }
 };
 
+// Path gain from the cross-spectrum (0.4.1): H(f) = Sxy(f) / Sxx(f) per FFT bin over a
+// reply (Welch: 512-point Hann windows, 50 % overlap, windows with reference speech
+// only), then the mean of |H|^2 over 200 Hz - 3 kHz with a fixed nominal weighting W(f)
+// (long-term speech spectrum shape), renormalised over the bins the sound excited
+// (within 40 dB of the strongest). Each bin is estimated on its own, so what a sound
+// does not excite is left out instead of guessed, and the fixed weighting makes the
+// result independent of the sound's spectrum. Talking and room noise do not correlate
+// with the reference: they add scatter, no bias. Memory is supplied by the caller
+// (MEM_FLOATS floats, PSRAM on the device).
+struct SpectralPath {
+  static constexpr int N = 512, HOP = N / 2, BINS = N / 2 + 1, LOG2N = 9;
+  static constexpr size_t MEM_FLOATS = 2 * N /*ring x,y*/ + N /*speech flags*/ + N /*window*/ + N /*twiddles*/ +
+                                       2 * N /*fft re,im*/ + 4 * BINS /*sxx syy sxy_re sxy_im*/;
+  float *rx{nullptr}, *ry{nullptr}, *flag{nullptr}, *win{nullptr}, *tw{nullptr}, *fre{nullptr}, *fim{nullptr};
+  float *sxx{nullptr}, *syy{nullptr}, *sre{nullptr}, *sim{nullptr};
+  int pos{0}, since{0}, windows{0};
+  float speech_n{0};
+
+  bool attach(float *mem) {
+    if (mem == nullptr)
+      return false;
+    float *p = mem;
+    rx = p; p += N;
+    ry = p; p += N;
+    flag = p; p += N;
+    win = p; p += N;
+    tw = p; p += N;  // cos (first half), sin (second half) for k < N/2
+    fre = p; p += N;
+    fim = p; p += N;
+    sxx = p; p += BINS;
+    syy = p; p += BINS;
+    sre = p; p += BINS;
+    sim = p; p += BINS;
+    const float pi = 3.14159265358979f;
+    for (int i = 0; i < N; i++) {
+      win[i] = 0.5f - 0.5f * std::cos(2.0f * pi * i / N);
+      rx[i] = ry[i] = flag[i] = 0.0f;
+    }
+    for (int k = 0; k < N / 2; k++) {
+      tw[k] = std::cos(2.0f * pi * k / N);
+      tw[N / 2 + k] = -std::sin(2.0f * pi * k / N);
+    }
+    pos = since = 0;
+    speech_n = 0;
+    reset();
+    return true;
+  }
+  bool ready() const { return rx != nullptr; }
+  // a new reply: clear the spectra and the window history
+  void reset() {
+    if (!ready())
+      return;
+    for (int k = 0; k < BINS; k++)
+      sxx[k] = syy[k] = sre[k] = sim[k] = 0.0f;
+    for (int i = 0; i < N; i++)
+      flag[i] = 0.0f;
+    speech_n = 0;
+    since = 0;
+    windows = 0;
+  }
+  // x: reference, y: mic (A-weighted), same samples. speech: the reference carries
+  // sound in this block. A window counts when at least 3/4 of it is speech.
+  void push(const float *x, const float *y, uint32_t len, bool speech) {
+    if (!ready())
+      return;
+    const float f = speech ? 1.0f : 0.0f;
+    for (uint32_t i = 0; i < len; i++) {
+      speech_n += f - flag[pos];
+      rx[pos] = x[i];
+      ry[pos] = y[i];
+      flag[pos] = f;
+      pos = (pos + 1) % N;
+      if (++since >= HOP) {
+        since = 0;
+        if (speech_n >= 0.75f * N)
+          accumulate_();
+      }
+    }
+  }
+  struct Result {
+    float p_db{NAN};      // weighted path gain (dB)
+    float coverage{0};    // share of the weighting in excited bins
+    float coherence{0};   // weighted mean coherence (0..1)
+    int windows{0};
+  };
+  Result result(float sample_rate) const {
+    Result r;
+    r.windows = windows;
+    if (!ready() || windows == 0)
+      return r;
+    float smax = 0.0f;
+    for (int k = 0; k < BINS; k++) {
+      const float fk = k * sample_rate / N;
+      if (fk >= 200.0f && fk <= 3000.0f)
+        smax = std::max(smax, sxx[k]);
+    }
+    if (smax <= 0.0f)
+      return r;
+    double wall = 0, wok = 0, acc = 0, coh = 0;
+    for (int k = 0; k < BINS; k++) {
+      const float fk = k * sample_rate / N;
+      if (fk < 200.0f || fk > 3000.0f)
+        continue;
+      const double w = weight(fk);
+      wall += w;
+      if (sxx[k] < smax * 1e-4f || syy[k] <= 0.0f)
+        continue;
+      const double cross = static_cast<double>(sre[k]) * sre[k] + static_cast<double>(sim[k]) * sim[k];
+      wok += w;
+      acc += w * cross / (static_cast<double>(sxx[k]) * sxx[k]);
+      coh += w * cross / (static_cast<double>(sxx[k]) * syy[k]);
+    }
+    if (wok <= 0.0)
+      return r;
+    r.coverage = static_cast<float>(wok / wall);
+    r.coherence = static_cast<float>(coh / wok);
+    r.p_db = static_cast<float>(10.0 * std::log10(acc / wok + 1e-30));
+    return r;
+  }
+  // Nominal weighting: long-term speech spectrum shape (power), band 200 Hz - 3 kHz
+  static double weight(double f) {
+    const double lp = 1.0 / (1.0 + (f / 500.0) * (f / 500.0));
+    const double hp = (f / 200.0) * (f / 200.0) / (1.0 + (f / 200.0) * (f / 200.0));
+    return lp * hp;
+  }
+
+ private:
+  void accumulate_() {
+    // pack x (real) and y (imaginary) into one complex FFT, oldest sample first
+    for (int i = 0; i < N; i++) {
+      const int j = (pos + i) % N;
+      int r = 0;  // bit-reversed index
+      for (int b = 0; b < LOG2N; b++)
+        r |= ((i >> b) & 1) << (LOG2N - 1 - b);
+      fre[r] = win[i] * rx[j];
+      fim[r] = win[i] * ry[j];
+    }
+    for (int len = 2; len <= N; len <<= 1) {
+      const int half = len / 2, step = N / len;
+      for (int s = 0; s < N; s += len)
+        for (int k = 0; k < half; k++) {
+          const float wr = tw[k * step], wi = tw[N / 2 + k * step];
+          const int a = s + k, b = a + half;
+          const float tr = fre[b] * wr - fim[b] * wi, ti = fre[b] * wi + fim[b] * wr;
+          fre[b] = fre[a] - tr;
+          fim[b] = fim[a] - ti;
+          fre[a] += tr;
+          fim[a] += ti;
+        }
+    }
+    for (int k = 0; k < BINS; k++) {
+      const int m = (N - k) % N;
+      // X = (Z[k] + conj Z[N-k]) / 2, Y = (Z[k] - conj Z[N-k]) / 2j
+      const float xr = 0.5f * (fre[k] + fre[m]), xi = 0.5f * (fim[k] - fim[m]);
+      const float yr = 0.5f * (fim[k] + fim[m]), yi = -0.5f * (fre[k] - fre[m]);
+      sxx[k] += xr * xr + xi * xi;
+      syy[k] += yr * yr + yi * yi;
+      // conj(X) * Y
+      sre[k] += xr * yr + xi * yi;
+      sim[k] += xr * yi - xi * yr;
+    }
+    windows++;
+  }
+};
+
 struct AWeighting {
   float b0{0}, b1{0}, b2{0}, a1{0}, a2{0}, rc_a{0};
   float x1{0}, x2{0}, y1{0}, y2{0}, hp_x1{0}, hp_y1{0};

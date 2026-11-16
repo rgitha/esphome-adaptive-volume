@@ -1,6 +1,6 @@
 # esphome-adaptive-volume
 
-> Version 0.4.0 (branch coherent-s): experimental.
+> Version 0.4.1 (branch coherent-s): experimental.
 
 ESPHome external component that turns all sound down in a quiet room and back
 up when the room gets louder. It works on voice devices built on
@@ -150,14 +150,20 @@ being the announcement offset.
 
 **Path mode (0.4.0, set `analog_gain`).** S = P + `analog_gain`, and
 A = S − N − C as before. P is the path gain from the speaker reference (after
-volume and codec attenuation) to mic 1: during each reply both are A-weighted and
-cross-correlated over the frames where the reference carries speech (20 dB above
-its idle floor), lags 0–2 ms; P_k = 20·log10(|R_xy(τ*)| / R_xx) at the peak lag
-τ*. Talking and room noise do not correlate with the reference, so they add
-scatter but no bias, and the reply's own loudness cancels out. A reply counts
-when ρ ≥ 0.5, the peak is inside the window and there is at least 0.3 s of
-reference speech; P is the median of the last 5 (stored in flash, −9 dB before
-the first). How loud the played sound is, is not measured into S: C (loudness
+volume and codec attenuation) to mic 1, from the cross-spectrum (0.4.1): during
+each reply both are A-weighted, cut into 512-sample Hann windows (50 % overlap,
+windows where the reference carries sound), and per FFT bin
+H(f) = S_xy(f) / S_xx(f). P = 10·log10 of the mean |H|² over 200 Hz – 3 kHz with
+a fixed nominal weighting (long-term speech spectrum shape), renormalised over the
+bins the sound excited (within 40 dB of the strongest). Each frequency is
+estimated on its own, so what a sound does not excite is left out rather than
+guessed, and the fixed weighting makes P independent of the sound's spectrum (a
+time-domain fit or a single correlation lag was not: dark voices read low).
+Talking and room noise do not correlate with the reference, so they add scatter
+but no bias. A reply counts with at least 10 windows, 60 % of the weighting
+covered and a weighted coherence of at least 0.2; P is the median of the last 5
+(stored in flash, −9 dB before the first). The single-lag correlation is still
+logged for comparison. the first). How loud the played sound is, is not measured into S: C (loudness
 above the room) assumes the speaker output 45 dB below full scale at the
 reference (full volume, no attenuation, 0 dB analogue gain), for whatever is
 played: speech, music or chimes. The code adds that to C, and C is set as a whole

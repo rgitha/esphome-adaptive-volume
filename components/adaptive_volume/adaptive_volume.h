@@ -25,7 +25,7 @@
 namespace esphome {
 namespace adaptive_volume {
 
-static constexpr const char *ADAPTIVE_VOLUME_VERSION = "0.4.0";
+static constexpr const char *ADAPTIVE_VOLUME_VERSION = "0.4.1";
 
 class AdaptiveVolume;
 
@@ -143,6 +143,7 @@ class AdaptiveVolume : public Component, public esp_audio_stack::AudioCaptureObs
   uint32_t xc_y_n_{0};
   AWeighting aw_ref_;
   XCorr xc_;
+  SpectralPath sp_;  // path gain from the cross-spectrum (memory in PSRAM)
   float xc_ref_floor_db_{-90.0f};  // reference level while nothing plays
   uint16_t xc_ref_peak_{0};
   std::atomic<bool> xc_on_{false};  // set by the main loop while a reply is measured
