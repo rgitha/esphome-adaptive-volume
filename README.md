@@ -163,7 +163,7 @@ Talking and room noise do not correlate with the reference, so they add scatter
 but no bias. A reply counts with at least 10 windows, 60 % of the weighting
 covered and a weighted coherence of at least 0.2; P is the median of the last 5
 (stored in flash, −9 dB before the first). The single-lag correlation is still
-logged for comparison. the first). How loud the played sound is, is not measured into S: C (loudness
+logged for comparison. How loud the played sound is, is not measured into S: C (loudness
 above the room) assumes the speaker output 45 dB below full scale at the
 reference (full volume, no attenuation, 0 dB analogue gain), for whatever is
 played: speech, music or chimes. The code adds that to C, and C is set as a whole
