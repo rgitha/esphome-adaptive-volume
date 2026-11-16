@@ -152,7 +152,7 @@ being the announcement offset.
 speaker reference x (after volume and codec attenuation) and mic 1 y are
 cross-correlated over the frames where the reference carries speech (20 dB above
 its idle floor). The mic power coherent with the reference,
-Σ_τ R_xy(τ)² / (R_xx · n) over lags 0–0.5 ms, is the reply's own level at the mic:
+Σ_τ R_xy(τ)² / (R_xx · n) over lags 0–2 ms (amplifier, speaker and air), is the reply's own level at the mic:
 talking and room noise do not correlate with x, so they add scatter but no bias.
 Normalised like S_k (− volume, + codec attenuation) it gives S_coh, logged and
 published next to S_k (`speaker_level_coherent`); S does not use it yet. Summing

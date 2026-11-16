@@ -53,7 +53,7 @@ int main() {
            r.rho, r.lag, r.coherent_db - clean.coherent_db);
     assert(std::fabs(r.coherent_db - clean.coherent_db) < 1.0f);
   }
-  for (int d : {0, 5, 8}) {
+  for (int d : {0, 5, 8, 20, 32}) {
     const XCorr::Result r = run(0.1f, d, -60.0f, 3);
     printf("delay %d:      coherent %.2f lag %d (shift %+.2f dB)\n", d, r.coherent_db, r.lag,
            r.coherent_db - clean.coherent_db);

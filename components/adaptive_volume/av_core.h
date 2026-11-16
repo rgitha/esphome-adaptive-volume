@@ -91,10 +91,11 @@ struct NoiseEstimator {
 // over one reply, for the coherent speaker level: the part of the mic power that
 // is the reply itself. Talking and room noise do not correlate with x, so they
 // add scatter but no bias. Lags 0..LAGS-1 samples (mic after reference) cover the
-// speaker and the few cm of air; the coherent power is summed over them, so the
-// exact delay need not be known.
+// path from the reference loopback to the mic (amplifier, speaker, the few cm of
+// air); the coherent power is summed over them, so the exact delay need not
+// be known.
 struct XCorr {
-  static constexpr int LAGS = 9;  // 0..0.5 ms at 16 kHz
+  static constexpr int LAGS = 33;  // 0..2 ms at 16 kHz
   double rxx{0}, ryy{0}, rxy[LAGS]{};
   uint32_t n{0};
   float hist[LAGS - 1]{};  // last reference samples of the previous frame

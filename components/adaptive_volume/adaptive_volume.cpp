@@ -214,9 +214,16 @@ void AdaptiveVolume::on_reference_frame_(const esp_audio_stack::CaptureFrame &fr
 void AdaptiveVolume::log_coherent_(const CalResult &r) {
   XCorr::Result x;
   uint16_t peak;
+  char profile[(XCorr::LAGS / 4 + 1) * 7 + 1];
   {
     LockGuard guard(this->xc_lock_);
     x = this->xc_.result();
+    // Coarse lag profile (normalised correlation every 4th lag), to locate the peak
+    size_t len = 0;
+    profile[0] = '\0';
+    const double norm = std::sqrt(this->xc_.rxx * this->xc_.ryy);
+    for (int t = 0; t < XCorr::LAGS && norm > 0.0 && len + 7 < sizeof(profile); t += 4)
+      len += snprintf(profile + len, sizeof(profile) - len, " %.2f", this->xc_.rxy[t] / norm);
     const float seconds = this->xc_.n / this->core_.cfg.sample_rate;
     peak = this->xc_ref_peak_;
     this->xc_.reset();
@@ -233,6 +240,7 @@ void AdaptiveVolume::log_coherent_(const CalResult &r) {
            "Coherent: mic %.1f, coherent %.1f, ref %.1f dBFS, rho %.2f at lag %d, ref peak %.1f dBFS -> S_coh %.1f "
            "(S_k %.1f)",
            x.mic_db, x.coherent_db, x.ref_db, x.rho, x.lag, peak_db, s_coh, r.s_k);
+  ESP_LOGD(TAG, "Coherent: correlation at lags 0, 4 .. %d:%s", XCorr::LAGS - 1, profile);
 #ifdef USE_SENSOR
   if (this->speaker_level_coherent_sensor_ != nullptr)
     this->speaker_level_coherent_sensor_->publish_state(s_coh);
