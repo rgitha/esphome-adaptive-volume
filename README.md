@@ -1,6 +1,6 @@
 # esphome-adaptive-volume
 
-> Version 0.4.2 (branch coherent-s): experimental.
+> Version 0.4.2: in development and testing, not released yet.
 
 ESPHome external component that turns all sound down in a quiet room and back
 up when the room gets louder. It works on voice devices built on
