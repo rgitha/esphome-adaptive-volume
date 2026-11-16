@@ -25,7 +25,7 @@
 namespace esphome {
 namespace adaptive_volume {
 
-static constexpr const char *ADAPTIVE_VOLUME_VERSION = "0.4.1";
+static constexpr const char *ADAPTIVE_VOLUME_VERSION = "0.4.2";
 
 class AdaptiveVolume;
 
@@ -135,19 +135,35 @@ class AdaptiveVolume : public Component, public esp_audio_stack::AudioCaptureObs
   // audio-task state (A-weighting filters)
   AWeighting aw_in_, aw_out_;
 
-  // Coherent speaker level (diagnostic, v0.3.3): the mic frame (A-weighted, mic 1)
-  // arrives before the reference frame of the same audio-task cycle.
-  bool log_coherent_(const CalResult &r, float *path_db);
-  static constexpr uint32_t XC_MAX = 1024;
-  float xc_y_[XC_MAX]{}, xc_x_[XC_MAX]{};
-  uint32_t xc_y_n_{0};
-  AWeighting aw_ref_;
-  XCorr xc_;
-  SpectralPath sp_;  // path gain from the cross-spectrum (memory in PSRAM)
-  float xc_ref_floor_db_{-90.0f};  // reference level while nothing plays
-  uint16_t xc_ref_peak_{0};
-  std::atomic<bool> xc_on_{false};  // set by the main loop while a reply is measured
-  Mutex xc_lock_;
+  // Path measurement (0.4.2). During a reply the audio task only copies the speaker
+  // reference and mic 1 (raw) into a PSRAM buffer, with a per-chunk "the reference
+  // carries sound" flag; after the reply the main loop analyses it a few windows per
+  // pass (A-weighting, cross-spectrum), so nothing heavy runs on the audio core.
+  // The mic frame arrives before the reference frame of the same audio-task cycle.
+  void path_start_();
+  void path_finish_(const CalResult &r);
+  bool path_step_();
+  void path_result_();
+  static constexpr uint32_t CAP_SECONDS = 10, CHUNK = 64, MIC_MAX = 1024;
+  int16_t *cap_{nullptr};       // interleaved reference, mic 1
+  uint8_t *cap_flag_{nullptr};  // per CHUNK samples: the reference carries sound
+  uint32_t cap_max_{0};         // samples per channel
+  std::atomic<uint32_t> cap_n_{0};
+  std::atomic<bool> cap_on_{false};  // set by the main loop while a reply is measured
+  std::atomic<uint16_t> ref_peak_{0};
+  int16_t mic_raw_[MIC_MAX]{};
+  uint32_t mic_raw_n_{0};
+  AWeighting aw_ref_;           // audio task: reference level for the sound gate
+  float ref_floor_db_{-90.0f};  // reference level while nothing plays
+  // analysis state (main loop)
+  SpectralPath sp_;             // memory in PSRAM
+  AWeighting an_x_, an_y_;
+  uint32_t an_pos_{0}, an_end_{0};
+  bool an_busy_{false};
+  double an_xx_{0}, an_yy_{0};
+  uint32_t an_n_{0};
+  float an_v0_{0}, an_m0_{0};
+  uint16_t an_peak_{0};
   float saved_s_{NAN};
   float saved_p_{NAN};
   ESPPreferenceObject p_pref_;

@@ -1,6 +1,6 @@
 # esphome-adaptive-volume
 
-> Version 0.4.1 (branch coherent-s): experimental.
+> Version 0.4.2 (branch coherent-s): experimental.
 
 ESPHome external component that turns all sound down in a quiet room and back
 up when the room gets louder. It works on voice devices built on
@@ -162,9 +162,12 @@ time-domain fit or a single correlation lag was not: dark voices read low).
 Talking and room noise do not correlate with the reference, so they add scatter
 but no bias. A reply counts with at least 10 windows, 60 % of the weighting
 covered and a weighted coherence of at least 0.2; P is the median of the last 5
-(stored in flash, −9 dB before the first). The single-lag correlation is still
-logged for comparison. How loud the played sound is, is not measured into S: C (loudness
-above the room) assumes the speaker output 45 dB below full scale at the
+(stored in flash when it moved 1 dB or more; a stored P counts as 3 entries after
+boot, so one odd reply cannot move it; −9 dB before the first). During a reply the
+audio task only copies the reference and mic 1 into a PSRAM buffer (up to 10 s);
+the main loop analyses it after the reply, about 4 ms per pass, so the audio core
+(wake word) carries no extra load. How loud the played sound is, is not measured into S: C (loudness
+above the room) assumes the speaker output 46 dB below full scale at the
 reference (full volume, no attenuation, 0 dB analogue gain), for whatever is
 played: speech, music or chimes. The code adds that to C, and C is set as a whole
 by ear. A louder or quieter sound or voice plays louder or quieter; evening out

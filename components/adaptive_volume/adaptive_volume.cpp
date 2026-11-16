@@ -17,6 +17,8 @@ namespace adaptive_volume {
 static const char *const TAG = "adaptive_volume";
 static constexpr uint32_t S_PREF_HASH = 0x5A7E1D0Bu;
 static constexpr uint32_t P_PREF_HASH = 0x5A7E1D0Du;  // path gain P, cross-spectral (0.4.1)
+static constexpr float P_SAVE_STEP_DB = 1.0f;          // flash P when it moved this much since the last save
+static constexpr uint32_t PATH_STEP_BUDGET_US = 4000;  // analysis time per main-loop pass
 // Path-mode acceptance of one reply (cross-spectral estimate)
 static constexpr int P_MIN_WINDOWS = 10;           // 10 windows of 32 ms (50 % overlap)
 static constexpr float P_MIN_COVERAGE = 0.6f;      // share of the weighting excited by the sound
@@ -61,9 +63,17 @@ void AdaptiveVolume::setup() {
     });
   }
   if (this->core_.cfg.use_path) {
-    RAMAllocator<float> allocator;  // PSRAM first
-    if (!this->sp_.attach(allocator.allocate(SpectralPath::MEM_FLOATS)))
-      ESP_LOGE(TAG, "Could not allocate the path estimator; S stays at the nominal path gain");
+    RAMAllocator<float> fa;  // PSRAM first
+    RAMAllocator<int16_t> ia;
+    RAMAllocator<uint8_t> ba;
+    this->cap_max_ = CAP_SECONDS * static_cast<uint32_t>(this->core_.cfg.sample_rate);
+    this->cap_ = ia.allocate(2 * this->cap_max_);
+    this->cap_flag_ = ba.allocate(this->cap_max_ / CHUNK + 1);
+    if (!this->sp_.attach(fa.allocate(SpectralPath::MEM_FLOATS)) || this->cap_ == nullptr ||
+        this->cap_flag_ == nullptr) {
+      ESP_LOGE(TAG, "Could not allocate the path measurement; S stays at the nominal path gain");
+      this->cap_max_ = 0;
+    }
     // Path mode: P is stored; the S_k median (diagnostic) starts fresh
     this->p_pref_ = global_preferences->make_preference<float>(P_PREF_HASH);
     float stored = NAN;
@@ -178,118 +188,164 @@ void AdaptiveVolume::on_capture_frame(const esp_audio_stack::CaptureFrame &frame
   // Both points are A-weighted, so the speaker and room levels are measured in
   // the same band as the room noise (also keeps low-frequency hum out).
   double sum = 0.0;
-  // mic 1, A-weighted, kept for the cross-correlation with the reference frame
-  const bool keep = b.point == 0 && frame.frames <= XC_MAX;
+  // mic 1 raw, kept for the path measurement with the reference frame that follows
+  const bool keep = b.point == 0 && frame.frames <= MIC_MAX && this->cap_on_.load(std::memory_order_relaxed);
   for (size_t i = 0; i < frame.frames; i++) {
     const float y = w->process(smp[i * stride] * (1.0f / 32768.0f));
     sum += static_cast<double>(y) * y;
     if (keep)
-      this->xc_y_[i] = y;
+      this->mic_raw_[i] = smp[i * stride];
   }
   if (b.point == 0)
-    this->xc_y_n_ = keep ? static_cast<uint32_t>(frame.frames) : 0;
+    this->mic_raw_n_ = keep ? static_cast<uint32_t>(frame.frames) : 0;
   b.sum_sq = static_cast<float>(sum);
   this->push_(b);
 }
 
-// Reference frame (speaker signal after volume and codec attenuation): cross-
-// correlated with the mic frame of the same cycle while a reply is measured.
+// Reference frame (speaker signal after volume and codec attenuation). While a reply
+// is measured: copy it and the mic frame of the same cycle into the buffer, with the
+// sound gate (reference 20 dB above its idle floor). Light work only.
 void AdaptiveVolume::on_reference_frame_(const esp_audio_stack::CaptureFrame &frame) {
   const int16_t *smp = static_cast<const int16_t *>(frame.data);
   const size_t stride = frame.stride;
   const uint32_t len = static_cast<uint32_t>(frame.frames);
-  if (len > XC_MAX)
-    return;
   if (frame.sample_rate != this->aw_ref_.rate && frame.sample_rate > 0)
     this->aw_ref_.setup(frame.sample_rate);
   double sum = 0.0;
   int32_t pk = 0;
   for (uint32_t i = 0; i < len; i++) {
-    const int16_t s = smp[i * stride];
-    pk = std::max<int32_t>(pk, std::abs(static_cast<int32_t>(s)));
-    const float x = this->aw_ref_.process(s * (1.0f / 32768.0f));
-    this->xc_x_[i] = x;
+    const int16_t v = smp[i * stride];
+    pk = std::max<int32_t>(pk, std::abs(static_cast<int32_t>(v)));
+    const float x = this->aw_ref_.process(v * (1.0f / 32768.0f));
     sum += static_cast<double>(x) * x;
   }
   const float level = sum > 0.0 ? static_cast<float>(10.0 * std::log10(sum / len)) : -130.0f;
-  const bool on = this->xc_on_.load(std::memory_order_relaxed);
+  const bool on = this->cap_on_.load(std::memory_order_acquire);
   if (!on) {
     // idle floor of the reference: falls at once, rises slowly
-    if (level < this->xc_ref_floor_db_)
-      this->xc_ref_floor_db_ = level;
+    if (level < this->ref_floor_db_)
+      this->ref_floor_db_ = level;
     else
-      this->xc_ref_floor_db_ += 0.01f * (level - this->xc_ref_floor_db_);
+      this->ref_floor_db_ += 0.01f * (level - this->ref_floor_db_);
+    this->mic_raw_n_ = 0;
+    return;
   }
-  const bool matched = this->xc_y_n_ == len;
-  // speech in the reference: 20 dB above its idle floor (and not near silence)
-  const bool speech = on && matched && level >= std::max(this->xc_ref_floor_db_ + 20.0f, -75.0f);
-  LockGuard guard(this->xc_lock_);
-  if (on)
-    this->xc_ref_peak_ = static_cast<uint16_t>(std::max<int32_t>(this->xc_ref_peak_, std::min<int32_t>(pk, 65535)));
-  if (matched) {
-    this->xc_.add(this->xc_x_, this->xc_y_, len, speech);
-    if (on)
-      this->sp_.push(this->xc_x_, this->xc_y_, len, speech);
-  } else {
-    this->xc_.clear_history();
+  const uint32_t n = this->cap_n_.load(std::memory_order_relaxed);
+  if (this->mic_raw_n_ != len || this->cap_ == nullptr || n + len > this->cap_max_) {
+    this->mic_raw_n_ = 0;
+    return;
   }
-  this->xc_y_n_ = 0;
+  const uint16_t p16 = static_cast<uint16_t>(std::min<int32_t>(pk, 65535));
+  if (p16 > this->ref_peak_.load(std::memory_order_relaxed))
+    this->ref_peak_.store(p16, std::memory_order_relaxed);
+  int16_t *dst = this->cap_ + 2 * n;
+  for (uint32_t i = 0; i < len; i++) {
+    dst[2 * i] = smp[i * stride];
+    dst[2 * i + 1] = this->mic_raw_[i];
+  }
+  const uint8_t sound = level >= std::max(this->ref_floor_db_ + 20.0f, -75.0f) ? 1 : 0;
+  for (uint32_t c = n / CHUNK; c <= (n + len - 1) / CHUNK; c++)
+    this->cap_flag_[c] = sound;
+  this->cap_n_.store(n + len, std::memory_order_release);
+  this->mic_raw_n_ = 0;
 }
 
-// Coherent speaker level, logged next to the regular measurement (diagnostic only:
-// S is not changed by it).
-bool AdaptiveVolume::log_coherent_(const CalResult &r, float *path_db) {
-  XCorr::Result x;
-  SpectralPath::Result sp;
-  uint16_t peak;
-  char profile[(XCorr::LAGS / 4 + 1) * 7 + 1];
-  {
-    LockGuard guard(this->xc_lock_);
-    x = this->xc_.result();
-    sp = this->sp_.result(this->core_.cfg.sample_rate);
-    // Coarse lag profile (normalised correlation every 4th lag), to locate the peak
-    size_t len = 0;
-    profile[0] = '\0';
-    const double norm = std::sqrt(this->xc_.rxx * this->xc_.ryy);
-    for (int t = 0; t < XCorr::LAGS && norm > 0.0 && len + 7 < sizeof(profile); t += 4)
-      len += snprintf(profile + len, sizeof(profile) - len, " %.2f", this->xc_.rxy[t] / norm);
-    const float seconds = this->xc_.n / this->core_.cfg.sample_rate;
-    peak = this->xc_ref_peak_;
-    this->xc_.reset();
-    this->xc_ref_peak_ = 0;
-    if (std::isnan(x.gain_db) || seconds < this->core_.cfg.active_min_duration_s) {
-      ESP_LOGD(TAG, "Path: too little reference speech (%.2f s), not counted", seconds);
-      return false;
+// A reply starts: an unfinished analysis of the previous one is dropped.
+void AdaptiveVolume::path_start_() {
+  if (this->an_busy_) {
+    ESP_LOGD(TAG, "Path: previous reply not analysed (a new one started)");
+    this->an_busy_ = false;
+  }
+  this->cap_n_.store(0, std::memory_order_relaxed);
+  this->ref_peak_.store(0, std::memory_order_relaxed);
+}
+
+// The reply ended (capture already off): start analysing what was captured.
+void AdaptiveVolume::path_finish_(const CalResult &r) {
+  this->an_end_ = this->cap_n_.load(std::memory_order_acquire);
+  this->an_pos_ = 0;
+  this->an_xx_ = this->an_yy_ = 0.0;
+  this->an_n_ = 0;
+  this->an_v0_ = r.v0;
+  this->an_m0_ = r.m0;
+  this->an_peak_ = this->ref_peak_.load(std::memory_order_relaxed);
+  const uint32_t rate = static_cast<uint32_t>(this->core_.cfg.sample_rate);
+  this->an_x_.setup(rate);
+  this->an_y_.setup(rate);
+  this->sp_.reset();
+  this->an_busy_ = this->sp_.ready() && this->an_end_ >= CHUNK;
+  if (!this->an_busy_)
+    ESP_LOGD(TAG, "Path: nothing captured, not counted");
+}
+
+// Analyse a part of the capture (time-limited); true when done.
+bool AdaptiveVolume::path_step_() {
+  const uint32_t t0 = micros();
+  float xb[CHUNK], yb[CHUNK];
+  while (this->an_pos_ + CHUNK <= this->an_end_) {
+    const int16_t *src = this->cap_ + 2 * this->an_pos_;
+    const bool sound = this->cap_flag_[this->an_pos_ / CHUNK] != 0;
+    for (uint32_t i = 0; i < CHUNK; i++) {
+      xb[i] = this->an_x_.process(src[2 * i] * (1.0f / 32768.0f));
+      yb[i] = this->an_y_.process(src[2 * i + 1] * (1.0f / 32768.0f));
+      if (sound) {
+        this->an_xx_ += static_cast<double>(xb[i]) * xb[i];
+        this->an_yy_ += static_cast<double>(yb[i]) * yb[i];
+      }
     }
+    if (sound)
+      this->an_n_ += CHUNK;
+    this->sp_.push(xb, yb, CHUNK, sound);
+    this->an_pos_ += CHUNK;
+    if (micros() - t0 > PATH_STEP_BUDGET_US)
+      return false;
   }
-  const float peak_db = peak > 0 ? 20.0f * std::log10(peak / 32768.0f) : -96.0f;
-  // Reply level at the reference, normalised like S_k (volume and attenuation removed,
-  // at 0 dB analogue gain): shows how loud each voice plays
-  const float reply_ref = x.ref_db - this->core_.v_db(r.v0) + r.m0 - this->core_.cfg.analog_gain_db;
+  return true;
+}
+
+// Analysis done: log, check, and update P.
+void AdaptiveVolume::path_result_() {
+  this->an_busy_ = false;
+  const SpectralPath::Result sp = this->sp_.result(this->core_.cfg.sample_rate);
+  const float seconds = this->an_n_ / this->core_.cfg.sample_rate;
+  const float mic_db = this->an_n_ > 0 ? static_cast<float>(10.0 * std::log10(this->an_yy_ / this->an_n_ + 1e-13)) : NAN;
+  const float ref_db = this->an_n_ > 0 ? static_cast<float>(10.0 * std::log10(this->an_xx_ / this->an_n_ + 1e-13)) : NAN;
+  const float peak_db = this->an_peak_ > 0 ? 20.0f * std::log10(this->an_peak_ / 32768.0f) : -96.0f;
+  // Reply level at the reference (volume and attenuation removed, 0 dB analogue gain)
+  const float reply_ref = ref_db - this->core_.v_db(this->an_v0_) + this->an_m0_ - this->core_.cfg.analog_gain_db;
   ESP_LOGD(TAG,
-           "Path: %.1f dB (coverage %.2f, coherence %.2f, %d windows); single lag %.1f dB at lag %d, rho %.2f "
-           "(mic %.1f, ref %.1f dBFS, ref peak %.1f dBFS); reply level %.1f dBFS at the reference",
-           sp.p_db, sp.coverage, sp.coherence, sp.windows, x.gain_db, x.lag, x.rho, x.mic_db, x.ref_db, peak_db,
-           reply_ref);
-  ESP_LOGD(TAG, "Path: single-lag correlation at lags 0, 4 .. %d:%s", XCorr::LAGS - 1, profile);
-  if (std::isnan(sp.p_db) || sp.windows < P_MIN_WINDOWS) {
-    ESP_LOGD(TAG, "Path: too few windows with sound, not counted");
-    return false;
+           "Path: %.1f dB (coverage %.2f, coherence %.2f, %.2f s); mic %.1f, ref %.1f, ref peak %.1f dBFS; "
+           "reply level %.1f dBFS at the reference",
+           sp.p_db, sp.coverage, sp.coherence, seconds, mic_db, ref_db, peak_db, reply_ref);
+  const char *why = nullptr;
+  if (std::isnan(sp.p_db) || sp.windows < P_MIN_WINDOWS || seconds < this->core_.cfg.active_min_duration_s)
+    why = "too little sound";
+  else if (sp.coverage < P_MIN_COVERAGE)
+    why = "the sound covers too little of the band";
+  else if (sp.coherence < P_MIN_COHERENCE)
+    why = "coherence too low (talking or noise)";
+  if (why != nullptr) {
+    ESP_LOGD(TAG, "Path: not counted (%s)", why);
+    return;
   }
-  if (sp.coverage < P_MIN_COVERAGE) {
-    ESP_LOGD(TAG, "Path: the sound covers too little of the band (%.2f), not counted", sp.coverage);
-    return false;
-  }
-  if (sp.coherence < P_MIN_COHERENCE) {
-    ESP_LOGD(TAG, "Path: coherence too low (%.2f; talking or noise), not counted", sp.coherence);
-    return false;
-  }
-  *path_db = sp.p_db;
 #ifdef USE_SENSOR
   if (this->path_gain_reply_sensor_ != nullptr)
     this->path_gain_reply_sensor_->publish_state(sp.p_db);
 #endif
-  return true;
+  const float s_old = this->core_.s_use();
+  this->core_.push_p(sp.p_db);
+  ESP_LOGD(TAG, "Path: P %.1f dB (median of %d) -> S %.1f (was %.1f)", this->core_.p, this->core_.p_count(),
+           this->core_.s_use(), s_old);
+  float p = this->core_.p;
+  if (std::isnan(this->saved_p_) || std::fabs(p - this->saved_p_) >= P_SAVE_STEP_DB) {
+    this->p_pref_.save(&p);
+    this->saved_p_ = p;
+  }
+#ifdef USE_SENSOR
+  if (this->path_gain_sensor_ != nullptr)
+    this->path_gain_sensor_->publish_state(p);
+#endif
+  this->apply_(false);
 }
 
 // ---------------------------------------------------------------- main loop
@@ -333,40 +389,21 @@ void AdaptiveVolume::loop() {
   const bool blocked = this->blocked_f_ ? this->blocked_f_() : false;
   const float v = this->media_player_ != nullptr ? this->media_player_->volume : 1.0f;
   const CalResult r = this->core_.reply_update(reply, static_cast<uint64_t>(esp_timer_get_time()), v, blocked);
-  const bool xc_measuring = this->core_.measuring();
-  if (xc_measuring && !this->xc_on_.load(std::memory_order_relaxed)) {
-    LockGuard guard(this->xc_lock_);  // a new reply: start from zero
-    this->xc_.reset();
-    this->sp_.reset();
-    this->xc_ref_peak_ = 0;
+  if (this->core_.cfg.use_path && this->cap_max_ > 0) {
+    const bool measuring = this->core_.measuring();
+    if (measuring && !this->cap_on_.load(std::memory_order_relaxed))
+      this->path_start_();
+    this->cap_on_.store(measuring, std::memory_order_release);
   }
-  this->xc_on_.store(xc_measuring, std::memory_order_relaxed);
   if (r.kind != CalResult::NONE) {
     this->log_result_(r);
-    float path_db = NAN;
-    const bool path_ok = this->log_coherent_(r, &path_db);
     if (this->core_.cfg.use_path) {
 #ifdef USE_SENSOR
       if (r.kind == CalResult::DETECTED && this->speaker_level_reply_sensor_ != nullptr)
         this->speaker_level_reply_sensor_->publish_state(r.s_k);
 #endif
-      if (path_ok) {
-        const float s_old = this->core_.s_use();
-        this->core_.push_p(path_db);
-        ESP_LOGD(TAG, "Path: P %.1f dB (median of %d) -> S %.1f (was %.1f)", this->core_.p, this->core_.p_count(),
-                 this->core_.s_use(), s_old);
-        float p = this->core_.p;
-        // Flash only when P moved by 0.5 dB or more since the last save
-        if (std::isnan(this->saved_p_) || std::fabs(p - this->saved_p_) >= 0.5f) {
-          this->p_pref_.save(&p);
-          this->saved_p_ = p;
-        }
-#ifdef USE_SENSOR
-        if (this->path_gain_sensor_ != nullptr)
-          this->path_gain_sensor_->publish_state(this->core_.p);
-#endif
-        this->apply_(false);
-      }
+      if (this->cap_max_ > 0)
+        this->path_finish_(r);
     } else if (r.kind == CalResult::DETECTED || r.kind == CalResult::LOWERED) {
       float s = this->core_.s;
       // Flash only when S moved by 1 dB or more since the last save
@@ -383,6 +420,9 @@ void AdaptiveVolume::loop() {
       this->apply_(false);
     }
   }
+
+  if (this->an_busy_ && this->path_step_())
+    this->path_result_();
 
   if (noise_updated)
     this->apply_(false);

@@ -18,7 +18,7 @@ from esphome.const import (
     STATE_CLASS_MEASUREMENT,
 )
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 CODEOWNERS = ["@rgitha"]
 DEPENDENCIES = ["esp_audio_stack", "media_player"]
@@ -85,7 +85,7 @@ CONFIG_SCHEMA = cv.All(
             ),
             # Path mode (0.4.0), on when analog_gain is set: S = path gain (cross-
             # correlation of the speaker reference and mic 1) + analog_gain; the
-            # loudness constant assumes the speaker output 45 dB below full scale at the
+            # loudness constant assumes the speaker output 46 dB below full scale at the
             # reference. Without it, S comes from the reply levels (S_k) as before.
             cv.Optional(CONF_ANALOG_GAIN): cv.float_range(min=0.0, max=40.0),
             cv.Optional(CONF_LOUDNESS_CONSTANT, default=20.0): cv.float_range(
