@@ -18,7 +18,7 @@ from esphome.const import (
     STATE_CLASS_MEASUREMENT,
 )
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 
 CODEOWNERS = ["@rgitha"]
 DEPENDENCIES = ["esp_audio_stack", "media_player"]
@@ -43,6 +43,7 @@ CONF_OFFSET = "offset"
 CONF_ROOM_NOISE = "room_noise"
 CONF_SPEAKER_LEVEL = "speaker_level"
 CONF_SPEAKER_LEVEL_REPLY = "speaker_level_reply"
+CONF_SPEAKER_LEVEL_COHERENT = "speaker_level_coherent"
 CONF_ATTENUATION = "attenuation"
 CONF_CURRENT_VOLUME = "current_volume"
 CONF_ECHO_REDUCTION = "echo_reduction"
@@ -128,6 +129,14 @@ CONFIG_SCHEMA = cv.All(
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
             cv.Optional(CONF_SPEAKER_LEVEL_REPLY): sensor.sensor_schema(
+                unit_of_measurement=UNIT_DBFS,
+                icon="mdi:speaker-message",
+                accuracy_decimals=1,
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
+            # Diagnostic (v0.3.3): S_k from the mic power coherent with the speaker
+            # reference (talking and room noise excluded); S does not use it yet.
+            cv.Optional(CONF_SPEAKER_LEVEL_COHERENT): sensor.sensor_schema(
                 unit_of_measurement=UNIT_DBFS,
                 icon="mdi:speaker-message",
                 accuracy_decimals=1,
@@ -227,6 +236,7 @@ async def to_code(config):
         (CONF_ROOM_NOISE, var.set_room_noise_sensor),
         (CONF_SPEAKER_LEVEL, var.set_speaker_level_sensor),
         (CONF_SPEAKER_LEVEL_REPLY, var.set_speaker_level_reply_sensor),
+        (CONF_SPEAKER_LEVEL_COHERENT, var.set_speaker_level_coherent_sensor),
         (CONF_ATTENUATION, var.set_attenuation_sensor),
         (CONF_CURRENT_VOLUME, var.set_current_volume_sensor),
         (CONF_ECHO_REDUCTION, var.set_echo_reduction_sensor),

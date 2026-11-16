@@ -1,6 +1,6 @@
 # esphome-adaptive-volume
 
-> Version 0.3.2: in development and testing, not released yet.
+> Version 0.3.3: in development and testing, not released yet.
 
 ESPHome external component that turns all sound down in a quiet room and back
 up when the room gets louder. It works on voice devices built on
@@ -147,6 +147,17 @@ S is saved to flash when it has moved by 1 dB or more since the last save.
 C = loudness_constant + offset. A follows A_t in whole dB when it moves by
 `hysteresis` or more (0 below 0.5 dB). The codec gets M = max(0, A − B), B
 being the announcement offset.
+
+**Coherent speaker level (diagnostic, 0.3.3).** During a reply, the A-weighted
+speaker reference x (after volume and codec attenuation) and mic 1 y are
+cross-correlated over the frames where the reference carries speech (20 dB above
+its idle floor). The mic power coherent with the reference,
+Σ_τ R_xy(τ)² / (R_xx · n) over lags 0–0.5 ms, is the reply's own level at the mic:
+talking and room noise do not correlate with x, so they add scatter but no bias.
+Normalised like S_k (− volume, + codec attenuation) it gives S_coh, logged and
+published next to S_k (`speaker_level_coherent`); S does not use it yet. Summing
+over neighbouring lags reads a constant ~2 dB high for speech (its own
+correlation), the same on every reply.
 
 **Echo reduction (diagnostic).** Over each stretch of playback (media player
 playing or announcing, at least 1.5 s): the A-weighted level of mic 1 before

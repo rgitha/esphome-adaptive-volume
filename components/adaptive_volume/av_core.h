@@ -87,6 +87,74 @@ struct NoiseEstimator {
 // Approximate A-weighting: 2nd-order Butterworth high-pass at 200 Hz plus a
 // 1st-order high-pass at 500 Hz (within ~1-2 dB of A-weighting from 200 Hz up,
 // stronger below, which also removes DC, hum and rumble).
+// Cross-correlation of the speaker reference x and the mic y (both A-weighted)
+// over one reply, for the coherent speaker level: the part of the mic power that
+// is the reply itself. Talking and room noise do not correlate with x, so they
+// add scatter but no bias. Lags 0..LAGS-1 samples (mic after reference) cover the
+// speaker and the few cm of air; the coherent power is summed over them, so the
+// exact delay need not be known.
+struct XCorr {
+  static constexpr int LAGS = 9;  // 0..0.5 ms at 16 kHz
+  double rxx{0}, ryy{0}, rxy[LAGS]{};
+  uint32_t n{0};
+  float hist[LAGS - 1]{};  // last reference samples of the previous frame
+  void reset() {
+    rxx = ryy = 0;
+    for (double &v : rxy) v = 0;
+    n = 0;
+  }
+  void clear_history() {
+    for (float &v : hist) v = 0.0f;
+  }
+  // x: reference, y: mic, same frame. accumulate = speech in the reference.
+  void add(const float *x, const float *y, uint32_t len, bool accumulate) {
+    if (accumulate) {
+      for (uint32_t i = 0; i < len; i++) {
+        const float yi = y[i];
+        rxx += static_cast<double>(x[i]) * x[i];
+        ryy += static_cast<double>(yi) * yi;
+        for (int t = 0; t < LAGS; t++) {
+          const int j = static_cast<int>(i) - t;
+          const float xv = j >= 0 ? x[j] : hist[LAGS - 1 + j];
+          rxy[t] += static_cast<double>(xv) * yi;
+        }
+      }
+      n += len;
+    }
+    // keep the last LAGS-1 reference samples for the next frame
+    for (int k = 0; k < LAGS - 1; k++) {
+      const int j = static_cast<int>(len) - (LAGS - 1) + k;
+      hist[k] = j >= 0 ? x[j] : hist[k + len];
+    }
+  }
+  struct Result {
+    float coherent_db{NAN};  // mic power coherent with the reference (dBFS)
+    float mic_db{NAN};       // all mic power over the same frames (dBFS)
+    float ref_db{NAN};       // reference power over the same frames (dBFS)
+    float rho{NAN};          // correlation coefficient at the peak lag
+    int lag{-1};             // peak lag (samples)
+  };
+  Result result() const {
+    Result r;
+    if (n == 0 || rxx <= 0.0 || ryy <= 0.0)
+      return r;
+    double coh = 0.0, best = 0.0;
+    for (int t = 0; t < LAGS; t++) {
+      coh += rxy[t] * rxy[t];
+      if (std::fabs(rxy[t]) > best) {
+        best = std::fabs(rxy[t]);
+        r.lag = t;
+      }
+    }
+    coh /= rxx * n;
+    r.coherent_db = coh > 1e-13 ? static_cast<float>(10.0 * std::log10(coh)) : -130.0f;
+    r.mic_db = static_cast<float>(10.0 * std::log10(ryy / n + 1e-13));
+    r.ref_db = static_cast<float>(10.0 * std::log10(rxx / n + 1e-13));
+    r.rho = static_cast<float>(best / std::sqrt(rxx * ryy));
+    return r;
+  }
+};
+
 struct AWeighting {
   float b0{0}, b1{0}, b2{0}, a1{0}, a2{0}, rc_a{0};
   float x1{0}, x2{0}, y1{0}, y2{0}, hp_x1{0}, hp_y1{0};

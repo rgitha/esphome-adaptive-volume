@@ -25,7 +25,7 @@
 namespace esphome {
 namespace adaptive_volume {
 
-static constexpr const char *ADAPTIVE_VOLUME_VERSION = "0.3.2";
+static constexpr const char *ADAPTIVE_VOLUME_VERSION = "0.3.3";
 
 class AdaptiveVolume;
 
@@ -66,6 +66,7 @@ class AdaptiveVolume : public Component, public esp_audio_stack::AudioCaptureObs
   // AudioCaptureObserver (audio task)
   bool capture_active(esp_audio_stack::CapturePoint point) const override;
   void on_capture_frame(const esp_audio_stack::CaptureFrame &frame) override;
+  void on_reference_frame_(const esp_audio_stack::CaptureFrame &frame);
 
   // configuration
   void set_stack(esp_audio_stack::ESPAudioStack *stack) { this->stack_ = stack; }
@@ -89,6 +90,7 @@ class AdaptiveVolume : public Component, public esp_audio_stack::AudioCaptureObs
   void set_room_noise_sensor(sensor::Sensor *s) { this->room_noise_sensor_ = s; }
   void set_speaker_level_sensor(sensor::Sensor *s) { this->speaker_level_sensor_ = s; }
   void set_speaker_level_reply_sensor(sensor::Sensor *s) { this->speaker_level_reply_sensor_ = s; }
+  void set_speaker_level_coherent_sensor(sensor::Sensor *s) { this->speaker_level_coherent_sensor_ = s; }
   void set_echo_reduction_sensor(sensor::Sensor *s) { this->echo_reduction_sensor_ = s; }
   void set_mic_peak_sensor(sensor::Sensor *s) { this->mic_peak_sensor_ = s; }
   void set_attenuation_sensor(sensor::Sensor *s) { this->attenuation_sensor_ = s; }
@@ -127,6 +129,19 @@ class AdaptiveVolume : public Component, public esp_audio_stack::AudioCaptureObs
 
   // audio-task state (A-weighting filters)
   AWeighting aw_in_, aw_out_;
+
+  // Coherent speaker level (diagnostic, v0.3.3): the mic frame (A-weighted, mic 1)
+  // arrives before the reference frame of the same audio-task cycle.
+  void log_coherent_(const CalResult &r);
+  static constexpr uint32_t XC_MAX = 1024;
+  float xc_y_[XC_MAX]{}, xc_x_[XC_MAX]{};
+  uint32_t xc_y_n_{0};
+  AWeighting aw_ref_;
+  XCorr xc_;
+  float xc_ref_floor_db_{-90.0f};  // reference level while nothing plays
+  uint16_t xc_ref_peak_{0};
+  std::atomic<bool> xc_on_{false};  // set by the main loop while a reply is measured
+  Mutex xc_lock_;
   float saved_s_{NAN};
 
   static constexpr uint32_t RING = 128;
@@ -145,6 +160,7 @@ class AdaptiveVolume : public Component, public esp_audio_stack::AudioCaptureObs
   sensor::Sensor *room_noise_sensor_{nullptr};
   sensor::Sensor *speaker_level_sensor_{nullptr};
   sensor::Sensor *speaker_level_reply_sensor_{nullptr};
+  sensor::Sensor *speaker_level_coherent_sensor_{nullptr};
   sensor::Sensor *echo_reduction_sensor_{nullptr};
   sensor::Sensor *mic_peak_sensor_{nullptr};
   sensor::Sensor *attenuation_sensor_{nullptr};

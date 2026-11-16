@@ -103,7 +103,8 @@ void AdaptiveVolume::dump_config() {
 
 bool AdaptiveVolume::capture_active(esp_audio_stack::CapturePoint point) const {
   return point == esp_audio_stack::CapturePoint::PROCESSOR_INPUT ||
-         point == esp_audio_stack::CapturePoint::PROCESSOR_OUTPUT;
+         point == esp_audio_stack::CapturePoint::PROCESSOR_OUTPUT ||
+         point == esp_audio_stack::CapturePoint::REFERENCE;
 }
 
 void AdaptiveVolume::push_(const Block &b) {
@@ -125,6 +126,10 @@ void AdaptiveVolume::on_capture_frame(const esp_audio_stack::CaptureFrame &frame
   Block b{};
   b.n = static_cast<uint32_t>(frame.frames);
   b.ts_us = frame.timestamp_us;
+  if (frame.point == esp_audio_stack::CapturePoint::REFERENCE) {
+    this->on_reference_frame_(frame);
+    return;
+  }
   AWeighting *w;
   if (frame.point == esp_audio_stack::CapturePoint::PROCESSOR_INPUT) {
     w = &this->aw_in_;  // mic 1 (first channel), before echo cancellation and BSS
@@ -149,12 +154,89 @@ void AdaptiveVolume::on_capture_frame(const esp_audio_stack::CaptureFrame &frame
   // Both points are A-weighted, so the speaker and room levels are measured in
   // the same band as the room noise (also keeps low-frequency hum out).
   double sum = 0.0;
+  // mic 1, A-weighted, kept for the cross-correlation with the reference frame
+  const bool keep = b.point == 0 && frame.frames <= XC_MAX;
   for (size_t i = 0; i < frame.frames; i++) {
     const float y = w->process(smp[i * stride] * (1.0f / 32768.0f));
     sum += static_cast<double>(y) * y;
+    if (keep)
+      this->xc_y_[i] = y;
   }
+  if (b.point == 0)
+    this->xc_y_n_ = keep ? static_cast<uint32_t>(frame.frames) : 0;
   b.sum_sq = static_cast<float>(sum);
   this->push_(b);
+}
+
+// Reference frame (speaker signal after volume and codec attenuation): cross-
+// correlated with the mic frame of the same cycle while a reply is measured.
+void AdaptiveVolume::on_reference_frame_(const esp_audio_stack::CaptureFrame &frame) {
+  const int16_t *smp = static_cast<const int16_t *>(frame.data);
+  const size_t stride = frame.stride;
+  const uint32_t len = static_cast<uint32_t>(frame.frames);
+  if (len > XC_MAX)
+    return;
+  if (frame.sample_rate != this->aw_ref_.rate && frame.sample_rate > 0)
+    this->aw_ref_.setup(frame.sample_rate);
+  double sum = 0.0;
+  int32_t pk = 0;
+  for (uint32_t i = 0; i < len; i++) {
+    const int16_t s = smp[i * stride];
+    pk = std::max<int32_t>(pk, std::abs(static_cast<int32_t>(s)));
+    const float x = this->aw_ref_.process(s * (1.0f / 32768.0f));
+    this->xc_x_[i] = x;
+    sum += static_cast<double>(x) * x;
+  }
+  const float level = sum > 0.0 ? static_cast<float>(10.0 * std::log10(sum / len)) : -130.0f;
+  const bool on = this->xc_on_.load(std::memory_order_relaxed);
+  if (!on) {
+    // idle floor of the reference: falls at once, rises slowly
+    if (level < this->xc_ref_floor_db_)
+      this->xc_ref_floor_db_ = level;
+    else
+      this->xc_ref_floor_db_ += 0.01f * (level - this->xc_ref_floor_db_);
+  }
+  const bool matched = this->xc_y_n_ == len;
+  // speech in the reference: 20 dB above its idle floor (and not near silence)
+  const bool speech = on && matched && level >= std::max(this->xc_ref_floor_db_ + 20.0f, -75.0f);
+  LockGuard guard(this->xc_lock_);
+  if (on)
+    this->xc_ref_peak_ = static_cast<uint16_t>(std::max<int32_t>(this->xc_ref_peak_, std::min<int32_t>(pk, 65535)));
+  if (matched)
+    this->xc_.add(this->xc_x_, this->xc_y_, len, speech);
+  else
+    this->xc_.clear_history();
+  this->xc_y_n_ = 0;
+}
+
+// Coherent speaker level, logged next to the regular measurement (diagnostic only:
+// S is not changed by it).
+void AdaptiveVolume::log_coherent_(const CalResult &r) {
+  XCorr::Result x;
+  uint16_t peak;
+  {
+    LockGuard guard(this->xc_lock_);
+    x = this->xc_.result();
+    const float seconds = this->xc_.n / this->core_.cfg.sample_rate;
+    peak = this->xc_ref_peak_;
+    this->xc_.reset();
+    this->xc_ref_peak_ = 0;
+    if (std::isnan(x.coherent_db) || seconds < this->core_.cfg.active_min_duration_s) {
+      ESP_LOGD(TAG, "Coherent: too little reference speech (%.2f s)", seconds);
+      return;
+    }
+    ESP_LOGD(TAG, "Coherent: %.2f s of reference speech", seconds);
+  }
+  const float peak_db = peak > 0 ? 20.0f * std::log10(peak / 32768.0f) : -96.0f;
+  const float s_coh = x.coherent_db - this->core_.v_db(r.v0) + r.m0;
+  ESP_LOGD(TAG,
+           "Coherent: mic %.1f, coherent %.1f, ref %.1f dBFS, rho %.2f at lag %d, ref peak %.1f dBFS -> S_coh %.1f "
+           "(S_k %.1f)",
+           x.mic_db, x.coherent_db, x.ref_db, x.rho, x.lag, peak_db, s_coh, r.s_k);
+#ifdef USE_SENSOR
+  if (this->speaker_level_coherent_sensor_ != nullptr)
+    this->speaker_level_coherent_sensor_->publish_state(s_coh);
+#endif
 }
 
 // ---------------------------------------------------------------- main loop
@@ -198,8 +280,16 @@ void AdaptiveVolume::loop() {
   const bool blocked = this->blocked_f_ ? this->blocked_f_() : false;
   const float v = this->media_player_ != nullptr ? this->media_player_->volume : 1.0f;
   const CalResult r = this->core_.reply_update(reply, static_cast<uint64_t>(esp_timer_get_time()), v, blocked);
+  const bool xc_measuring = this->core_.measuring();
+  if (xc_measuring && !this->xc_on_.load(std::memory_order_relaxed)) {
+    LockGuard guard(this->xc_lock_);  // a new reply: start from zero
+    this->xc_.reset();
+    this->xc_ref_peak_ = 0;
+  }
+  this->xc_on_.store(xc_measuring, std::memory_order_relaxed);
   if (r.kind != CalResult::NONE) {
     this->log_result_(r);
+    this->log_coherent_(r);
     if (r.kind == CalResult::DETECTED || r.kind == CalResult::LOWERED) {
       float s = this->core_.s;
       // Flash only when S moved by 1 dB or more since the last save
