@@ -20,33 +20,33 @@ namespace esphome {
 namespace adaptive_volume {
 
 // Robust noise estimator on 250 ms levels (dBFS):
-// 0.5 s block peaks -> min(3rd largest of the last 16, max of the last 9)
+// 0.5 s block averages (power) -> median of the last 16 blocks (8 s)
 // -> exponential smoothing (6 s rising, ~1.4 s falling).
-// The first WARMUP_BLOCKS blocks after boot are skipped: the start-up transient
-// (AFE, codec) made the first block read ~15 dB high, and the estimate then
-// took ~5 s to fall from it.
+// The median counts sound that fills most of the last 8 s (steady noise, continuous
+// talk or TV) and ignores sound that does not (intermittent talk, clatter), with no
+// separate hold or release. The first WARMUP_BLOCKS blocks after boot are skipped:
+// the start-up transient (AFE, codec) made the first block read ~15 dB high, and the
+// estimate then took ~5 s to fall from it.
 struct NoiseEstimator {
   static constexpr int BLOCK_SAMPLES = 2;
   static constexpr int N_BLOCKS = 16;
-  static constexpr int RANK = 3;
-  static constexpr int HOLD_BLOCKS = 9;
   static constexpr int WARMUP_BLOCKS = 2;  // 1 s
   int warmup = WARMUP_BLOCKS;
   float blocks[N_BLOCKS] = {};
   int n_blocks = 0, head = 0;
-  float block_peak = -200.0f;
+  double block_power = 0.0;
   int block_count = 0;
   float est = NAN;
 
   void discard_partial() {
-    block_peak = -200.0f;
+    block_power = 0.0;
     block_count = 0;
   }
   // Feed one 250 ms level; returns true when the estimate was updated (every 0.5 s).
   bool feed(float level) {
     const float RISE = 0.0800f;  // 1 - exp(-0.5 s / 6 s)
     const float FALL = 0.3f;     // ~1.4 s time constant
-    block_peak = std::max(block_peak, level);
+    block_power += std::pow(10.0, level / 10.0);
     if (++block_count < BLOCK_SAMPLES)
       return false;
     if (warmup > 0) {
@@ -54,28 +54,23 @@ struct NoiseEstimator {
       discard_partial();
       return false;
     }
-    blocks[head] = block_peak;
+    blocks[head] = static_cast<float>(10.0 * std::log10(block_power / BLOCK_SAMPLES + 1e-30));
     head = (head + 1) % N_BLOCKS;
     if (n_blocks < N_BLOCKS)
       n_blocks++;
     discard_partial();
-    float sorted[N_BLOCKS] = {};
-    for (int i = 0; i < n_blocks; i++)
-      sorted[i] = blocks[(head - 1 - i + N_BLOCKS) % N_BLOCKS];
-    // partial selection sort, descending, up to RANK
-    const int k = std::min(RANK, n_blocks);
-    for (int i = 0; i < k; i++) {
-      int m = i;
-      for (int j = i + 1; j < n_blocks; j++)
-        if (sorted[j] > sorted[m])
-          m = j;
-      std::swap(sorted[i], sorted[m]);
+    // median of the blocks held (insertion sort, at most 16)
+    float v[N_BLOCKS];
+    for (int i = 0; i < n_blocks; i++) {
+      const float x = blocks[i];
+      int k = i - 1;
+      while (k >= 0 && v[k] > x) {
+        v[k + 1] = v[k];
+        k--;
+      }
+      v[k + 1] = x;
     }
-    const float a = sorted[k - 1];
-    float b = -200.0f;
-    for (int i = 0; i < std::min(HOLD_BLOCKS, n_blocks); i++)
-      b = std::max(b, blocks[(head - 1 - i + N_BLOCKS) % N_BLOCKS]);
-    const float target = std::min(a, b);
+    const float target = (n_blocks % 2) ? v[n_blocks / 2] : 0.5f * (v[n_blocks / 2 - 1] + v[n_blocks / 2]);
     if (std::isnan(est))
       est = target;
     else

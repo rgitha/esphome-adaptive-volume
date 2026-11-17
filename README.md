@@ -1,6 +1,6 @@
 # esphome-adaptive-volume
 
-> Version 0.4.2: in development and testing, not released yet.
+> Version 0.4.3 (branch noise-median): experimental.
 
 ESPHome external component that turns all sound down in a quiet room and back
 up when the room gets louder. It works on voice devices built on
@@ -101,11 +101,12 @@ Symbols: P = power, L = 10·log10(P) in dBFS.
 Gain trim, is A-weighted (approximately:
 2nd-order high-pass at 200 Hz plus 1st-order at 500 Hz) and its RMS is taken
 over 250 ms. A robust estimator then follows noise you would have to talk over
-and ignores isolated sounds:
+and ignores sound that comes and goes:
 
-1. Peak per 0.5 s block.
-2. 3rd largest of the last 16 block peaks (8 s), capped by the largest of the
-   last 9 (4.5 s hold).
+1. Average (power) per 0.5 s block.
+2. Median of the last 16 blocks (8 s): sound counts when it fills most of the
+   last 8 s (steady noise, continuous talk or TV), not when it is intermittent
+   (chat between pauses, clatter). No separate hold or release.
 3. Exponential smoothing, 6 s rising, about 1.4 s falling.
 
 Only time when the device is idle (the `idle` condition) is used; otherwise the
