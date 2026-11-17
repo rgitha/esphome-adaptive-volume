@@ -1,6 +1,6 @@
 # esphome-adaptive-volume
 
-> Version 0.4.3 (branch noise-median): experimental.
+> Version 0.4.3.
 
 ESPHome external component that turns all sound down in a quiet room and back
 up when the room gets louder. It works on voice devices built on
