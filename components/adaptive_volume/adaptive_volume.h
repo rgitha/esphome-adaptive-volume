@@ -25,7 +25,7 @@
 namespace esphome {
 namespace adaptive_volume {
 
-static constexpr const char *ADAPTIVE_VOLUME_VERSION = "0.4.3";
+static constexpr const char *ADAPTIVE_VOLUME_VERSION = "0.4.4";
 
 class AdaptiveVolume;
 
@@ -111,8 +111,6 @@ class AdaptiveVolume : public Component, public esp_audio_stack::AudioCaptureObs
   // runtime API (from YAML lambdas)
   void set_enabled(bool enabled);
   void set_offset(float db);
-  /// Announcement offset B (dB): attenuation is reduced by this while it is set.
-  void set_announcement_offset(float db);
   float get_attenuation() const { return this->core_.a; }
   float get_speaker_level() const { return this->core_.s_use(); }
   float get_room_noise() const { return this->core_.n_a; }

@@ -490,14 +490,6 @@ void AdaptiveVolume::set_offset(float db) {
   this->apply_(true);
 }
 
-void AdaptiveVolume::set_announcement_offset(float db) {
-  if (db == this->core_.boost)
-    return;
-  this->core_.boost = db;
-  ESP_LOGD(TAG, "Announcement offset %.0f dB", db);
-  this->apply_(false);
-}
-
 void AdaptiveVolume::apply_(bool immediate) {
   const float a_before = this->core_.a;
   this->core_.update_attenuation();

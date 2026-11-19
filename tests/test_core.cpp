@@ -131,7 +131,7 @@ int main() {
     auto r = sim.reply(0.2);
     CHECK(r.kind == CalResult::SKIPPED, "0.2 s of speech skipped (kind %d)", r.kind);
   }
-  // 6. Offset +6 -> 6 dB less attenuation; announcement offset reduces M only.
+  // 6. Offset +6 -> 6 dB less attenuation; the codec gets M = A.
   {
     Sim sim;
     sim.idle(15);
@@ -139,9 +139,7 @@ int main() {
     sim.core.offset = 6.0f;
     sim.core.update_attenuation();
     CHECK(std::fabs((a0 - sim.core.a) - 6.0f) < 0.5f, "offset +6: %.1f -> %.1f", a0, sim.core.a);
-    sim.core.boost = 6.0f;
-    sim.core.update_attenuation();
-    CHECK(std::fabs(sim.core.m - (sim.core.a - 6.0f)) < 0.01f, "M = A - B");
+    CHECK(sim.core.m == sim.core.a, "M = A");
   }
   // 7. Scatter: 20 short replies, 6 dB independent jitter per 32 ms frame (harsh); S within 3 dB.
   {

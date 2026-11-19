@@ -1,6 +1,6 @@
 # esphome-adaptive-volume
 
-> Version 0.4.3.
+> Version 0.4.4.
 
 ESPHome external component that turns all sound down in a quiet room and back
 up when the room gets louder. It works on voice devices built on
@@ -61,10 +61,10 @@ The three conditions are lambdas so the component fits any voice assistant
 YAML. `voice_assistant_phase` and `va_run_active` above are globals of the
 example device; use whatever your configuration tracks.
 
-To give an announcement more level, call
-`id(adaptive).set_announcement_offset(6)` when it starts and
-`id(adaptive).set_announcement_offset(0)` when it ends. The offset reduces the
-attenuation, so it has no effect when the attenuation is already 0.
+Louder announcements or music are not part of this component (0.4.4 removed
+`set_announcement_offset()`): use the audio stack's output boost
+(`set_output_boost_db()` in the rgitha/esphome-audio-stack fork), which works
+whether adaptive volume is on or off.
 
 ## Options
 
@@ -146,8 +146,7 @@ S is saved to flash when it has moved by 1 dB or more since the last save.
 
 **Attenuation.** A_t = clamp(S − N_A − C, 0, max_attenuation), with
 C = loudness_constant + offset. A follows A_t in whole dB when it moves by
-`hysteresis` or more (0 below 0.5 dB). The codec gets M = max(0, A − B), B
-being the announcement offset.
+`hysteresis` or more (0 below 0.5 dB). The codec gets M = A.
 
 **Path mode (0.4.0, set `analog_gain`).** S = P + `analog_gain`, and
 A = S − N − C as before. P is the path gain from the speaker reference (after

@@ -9,7 +9,7 @@
 //   N_A        robust estimate of the A-weighted output level (room noise)
 //   S          speaker level at the mics, referred to V = 0 dB, M = 0 dB
 //   C          loudness constant + user offset
-//   A          applied attenuation, M = max(0, A - B) to the codec
+//   A          applied attenuation, M = A to the codec
 
 #include <algorithm>
 #include <cmath>
@@ -404,10 +404,9 @@ class Core {
   float room_pre{NAN};  // P_room,pre level (dBFS)
   bool ready{false};
   float a{0.0f};          // applied attenuation A (dB)
-  float m{0.0f};          // codec attenuation M = max(0, A - B)
+  float m{0.0f};          // codec attenuation M = A
   bool enabled{false};
   float offset{0.0f};     // user offset (dB, + = louder)
-  float boost{0.0f};      // announcement offset B (dB)
 
   // ---- helpers ----
   float v_db(float v) const {
@@ -542,7 +541,7 @@ class Core {
       a = 0.0f;
     else if (std::fabs(target - a) >= cfg.hysteresis)
       a = std::round(target);
-    const float new_m = std::max(0.0f, a - boost);
+    const float new_m = a;
     if (new_m == m)
       return false;
     m = new_m;
