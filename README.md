@@ -173,9 +173,9 @@ played: speech, music or chimes. The code adds that to C, and C is set as a whol
 by ear. A louder or quieter sound or voice plays louder or quieter; evening out
 voices belongs to the TTS setup. `analog_gain` is the mic and reference analogue
 gain: N follows it, P does not. Sensors `path_gain` (P) and `path_gain_reply`
-(each reply). The debug log has one line per counted reply (path gain, P, S); the
+(each reply). The debug log has one line per counted reply (path gain, P, S). The
 level at the reference, the reasons a reply was not counted and S_k (still
-measured, diagnostic) are at log level VERBOSE.
+measured, diagnostic) are only in firmware built with `logger: level: VERBOSE`.
 
 **Echo reduction (diagnostic).** Over each stretch of playback (media player
 playing or announcing, at least 1.5 s): the A-weighted level of mic 1 before
