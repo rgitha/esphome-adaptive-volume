@@ -1,6 +1,6 @@
 # esphome-adaptive-volume
 
-> Version 0.4.4.
+> Version 0.4.5.
 
 ESPHome external component that turns all sound down in a quiet room and back
 up when the room gets louder. It works on voice devices built on
@@ -173,8 +173,9 @@ played: speech, music or chimes. The code adds that to C, and C is set as a whol
 by ear. A louder or quieter sound or voice plays louder or quieter; evening out
 voices belongs to the TTS setup. `analog_gain` is the mic and reference analogue
 gain: N follows it, P does not. Sensors `path_gain` (P) and `path_gain_reply`
-(each reply); the log also gives each reply's level at the reference. S_k is still
-measured and logged (diagnostic).
+(each reply). The debug log has one line per counted reply (path gain, P, S); the
+level at the reference, the reasons a reply was not counted and S_k (still
+measured, diagnostic) are at log level VERBOSE.
 
 **Echo reduction (diagnostic).** Over each stretch of playback (media player
 playing or announcing, at least 1.5 s): the A-weighted level of mic 1 before

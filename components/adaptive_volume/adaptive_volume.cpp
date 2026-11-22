@@ -253,7 +253,7 @@ void AdaptiveVolume::on_reference_frame_(const esp_audio_stack::CaptureFrame &fr
 // A reply starts: an unfinished analysis of the previous one is dropped.
 void AdaptiveVolume::path_start_() {
   if (this->an_busy_) {
-    ESP_LOGD(TAG, "Path: previous reply not analysed (a new one started)");
+    ESP_LOGV(TAG, "Path: previous reply not analysed (a new one started)");
     this->an_busy_ = false;
   }
   this->cap_n_.store(0, std::memory_order_relaxed);
@@ -275,7 +275,7 @@ void AdaptiveVolume::path_finish_(const CalResult &r) {
   this->sp_.reset();
   this->an_busy_ = this->sp_.ready() && this->an_end_ >= CHUNK;
   if (!this->an_busy_)
-    ESP_LOGD(TAG, "Path: nothing captured, not counted");
+    ESP_LOGV(TAG, "Path: nothing captured, not counted");
 }
 
 // Analyse a part of the capture (time-limited); true when done.
@@ -313,7 +313,7 @@ void AdaptiveVolume::path_result_() {
   const float peak_db = this->an_peak_ > 0 ? 20.0f * std::log10(this->an_peak_ / 32768.0f) : -96.0f;
   // Reply level at the reference (volume and attenuation removed, 0 dB analogue gain)
   const float reply_ref = ref_db - this->core_.v_db(this->an_v0_) + this->an_m0_ - this->core_.cfg.analog_gain_db;
-  ESP_LOGD(TAG,
+  ESP_LOGV(TAG,
            "Path: %.1f dB (coverage %.2f, coherence %.2f, %.2f s); mic %.1f, ref %.1f, ref peak %.1f dBFS; "
            "reply level %.1f dBFS at the reference",
            sp.p_db, sp.coverage, sp.coherence, seconds, mic_db, ref_db, peak_db, reply_ref);
@@ -325,7 +325,7 @@ void AdaptiveVolume::path_result_() {
   else if (sp.coherence < P_MIN_COHERENCE)
     why = "coherence too low (talking or noise)";
   if (why != nullptr) {
-    ESP_LOGD(TAG, "Path: not counted (%s)", why);
+    ESP_LOGV(TAG, "Path: not counted (%s)", why);
     return;
   }
 #ifdef USE_SENSOR
@@ -334,8 +334,8 @@ void AdaptiveVolume::path_result_() {
 #endif
   const float s_old = this->core_.s_use();
   this->core_.push_p(sp.p_db);
-  ESP_LOGD(TAG, "Path: P %.1f dB (median of %d) -> S %.1f (was %.1f)", this->core_.p, this->core_.p_count(),
-           this->core_.s_use(), s_old);
+  ESP_LOGD(TAG, "Reply: path gain %.1f dB -> P %.1f dB (median of %d), S %.1f (was %.1f)", sp.p_db, this->core_.p,
+           this->core_.p_count(), this->core_.s_use(), s_old);
   float p = this->core_.p;
   if (std::isnan(this->saved_p_) || std::fabs(p - this->saved_p_) >= P_SAVE_STEP_DB) {
     this->p_pref_.save(&p);
@@ -436,12 +436,13 @@ void AdaptiveVolume::echo_finish_() {
     return;
   }
   if (e.valid) {
-    ESP_LOGD(TAG,
+    ESP_LOGD(TAG, "Echo reduction %s%.1f dB (%.1f s playback)", e.lower_bound ? ">= " : "", e.erle, e.seconds);
+    ESP_LOGV(TAG,
              "Echo: %.1f s playback, mic 1 %.1f dBFS (room %.1f), output %.1f (room %.1f) -> echo reduction %s%.1f dB, "
              "mic peak %.1f dBFS",
              e.seconds, e.in_l, e.room_in, e.out_l, e.room_out, e.lower_bound ? ">= " : "", e.erle, e.peak_dbfs);
   } else {
-    ESP_LOGD(TAG, "Echo: %.1f s playback, echo reduction not measured (%s), mic peak %.1f dBFS", e.seconds, e.reason,
+    ESP_LOGV(TAG, "Echo: %.1f s playback, echo reduction not measured (%s), mic peak %.1f dBFS", e.seconds, e.reason,
              e.peak_dbfs);
   }
 #ifdef USE_SENSOR
@@ -453,26 +454,30 @@ void AdaptiveVolume::echo_finish_() {
 }
 
 void AdaptiveVolume::log_result_(const CalResult &r) {
+  // In speaker-level mode this is the per-reply result: one line at debug level.
+  if (!this->core_.cfg.use_path && (r.kind == CalResult::DETECTED || r.kind == CalResult::LOWERED)) {
+    ESP_LOGD(TAG, "Reply: speaker level S %.1f (was %.1f)", r.s_new, r.s_old);
+  }
   switch (r.kind) {
     case CalResult::SKIPPED:
-      ESP_LOGD(TAG, "Speaker calibration: reply not counted (%s; %.2f s, speech %.2f s)", r.reason, r.seconds,
+      ESP_LOGV(TAG, "Speaker calibration: reply not counted (%s; %.2f s, speech %.2f s)", r.reason, r.seconds,
                r.active_s);
       break;
     case CalResult::DETECTED:
-      ESP_LOGD(TAG,
+      ESP_LOGV(TAG,
                "Speaker calibration: speech %.1f (%.2f of %.2f s), room %.1f, volume %.0f%%, attenuation %.0f dB "
                "-> S_k %.1f%s, S_k median %.1f (of %d, S in use %.1f)",
                r.in_l, r.active_s, r.seconds, r.room_l, r.v0 * 100.0f, r.m0, r.s_k,
                r.marginal ? " (marginal, lowers only)" : "", r.s_new, r.hist_n, r.s_old);
       break;
     case CalResult::LOWERED:
-      ESP_LOGD(TAG,
+      ESP_LOGV(TAG,
                "Speaker calibration: no speech above room (input %.1f, room %.1f, volume %.0f%%, attenuation %.0f dB): "
                "S %.1f > bound %.1f -> S %.1f",
                r.in_l, r.room_l, r.v0 * 100.0f, r.m0, r.s_old, r.bound, r.s_new);
       break;
     case CalResult::WITHIN_BOUND:
-      ESP_LOGD(TAG, "Speaker calibration: no speech above room (input %.1f, room %.1f): S %.1f within bound %.1f", r.in_l,
+      ESP_LOGV(TAG, "Speaker calibration: no speech above room (input %.1f, room %.1f): S %.1f within bound %.1f", r.in_l,
                r.room_l, r.s_old, r.bound);
       break;
     default:
@@ -510,7 +515,7 @@ void AdaptiveVolume::apply_master_() {
   const float master = m <= 0.0f ? 1.0f : (((span - m) * 99.0f / span) + 1.0f) / 100.0f;
   this->stack_->set_master_volume(master);
   this->last_master_m_ = this->core_.m;
-  ESP_LOGD(TAG, "Codec attenuation %.0f dB (master %.3f)", this->core_.m, master);
+  ESP_LOGV(TAG, "Codec attenuation %.0f dB (master %.3f)", this->core_.m, master);
 }
 
 void AdaptiveVolume::publish_reports_(bool force) {
